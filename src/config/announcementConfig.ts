@@ -5,7 +5,8 @@ export const announcementConfig: AnnouncementConfig = {
 	title: "公告",
 
 	// 公告内容
-	content: "欢迎来到我的博客！这是一则示例公告。",
+	content:
+		"本博客为 <b>Vibe Coding</b> 试验田 —— 所有文章、功能、设计均由 AI 辅助编程完成。这里记录着我的探索与踩坑，欢迎一起交流。",
 
 	// 是否允许用户关闭公告
 	closable: true,
