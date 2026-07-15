@@ -52,7 +52,7 @@ const getDynamicNavBarConfig = (): NavBarConfig => {
 			},
 			{
 				name: "项目地址",
-				url: "https://github.com/2485994338/myFireflyBlog",
+				url: "https://github.com/sanya2485/myFireflyBlog",
 				external: true,
 				icon: "fa7-brands:github",
 			},
