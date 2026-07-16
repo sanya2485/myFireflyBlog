@@ -12,7 +12,7 @@ export const siteConfig: SiteConfig = {
 	subtitle: "Sanya's Blog",
 
 	// 站点 URL
-	site_url: "https://sanya.cuteleaf.cn",
+	site_url: "https://www.sanyablog.cn",
 
 	// 站点描述
 	description:
