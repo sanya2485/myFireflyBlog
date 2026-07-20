@@ -84,6 +84,7 @@ jobs:
 
             docker run -d \
               --name myFireflyBlog \
+              --add-host host.docker.internal:host-gateway \
               -v /root/cc/myFireflyBlog:/usr/share/nginx/html:ro \
               $CONFIG_MOUNT \
               $SSL_MOUNT \
