@@ -140,6 +140,7 @@ server {
         allow 127.0.0.1;
         allow ::1;
         allow ${DEV_MACHINE_IP};     # 开发机出口 IP（从 Secret 注入）
+		allow YOUR_DEV_MACHINE_IP;       # 当前开发机 IP
         allow ${SERVER_HOST};        # 博客服务器 IP（从 Secret 注入）
         deny all;                     # 其他 IP → 403 Forbidden
 
