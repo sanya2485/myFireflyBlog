@@ -60,11 +60,13 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             set -e
-            echo "🧪 确保配置目录存在..."
+            echo "🧪 确保配置目录与共享网络存在..."
             mkdir -p /root/cc/nginx/conf
+            docker network inspect coze-net >/dev/null 2>&1 || docker network create coze-net
 
-            echo "🧪 用临时容器校验新配置语法..."
+            echo "🧪 用临时容器校验新配置语法（加入 coze-net 以解析 coze-gateway 上游）..."
             docker run --rm \
+              --network coze-net \
               -v /root/cc/nginx/conf/default.conf:/etc/nginx/conf.d/default.conf:ro \
               -v /root/cc/nginx/ssl:/etc/nginx/ssl:ro \
               nginx:alpine nginx -t
