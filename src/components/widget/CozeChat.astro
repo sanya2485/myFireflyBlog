@@ -90,8 +90,8 @@
   }
   .coze-hitbox:active .coze-ball { transform: translateY(-16px) scale(0.9); }
 
-  /* 气泡显示期间，球保持静止位（避免撞到气泡） */
-  .coze-widget.coze-has-bubble .coze-ball { transform: translateY(28px); }
+  /* 气泡显示期间，球弹出到完整位（09 模板形态：尾巴对准球顶） */
+  .coze-widget.coze-has-bubble .coze-ball { transform: translateY(-16px); }
 
   /* 聊天窗打开 → 整组隐藏（onShow/onHide 切换） */
   .coze-widget.coze-chat-open {
@@ -101,20 +101,26 @@
     transition: opacity var(--duration-normal) var(--ease-standard);
   }
 
-  /* --- 问候气泡 --- */
+  /* --- 问候气泡（模板 09：圆体大圆角，浅蓝卡片） ---
+     浅蓝主色照 09 模板；暗色模式用 html.dark 覆盖为深蓝灰。
+     必须显式 width:max-content：容器 width:0 下仅设 right 的绝对定位子元素
+     会 shrink-to-fit 坍缩成 ~58px 窄条（此前"字体难看"的根因）。 */
   .coze-bubble {
     position: absolute;
-    right: 0;
-    bottom: 64px; /* 位于悬浮球上方 */
-    max-width: 220px;
-    padding: 10px 14px;
-    border-radius: var(--radius-xl);
-    background: var(--card-bg);
-    border: 1px solid var(--line-divider);
-    box-shadow: var(--shadow-button);
+    right: 32px; /* 悬浮球左上方 */
+    bottom: 84px;
+    width: max-content; /* 修坍缩 bug：显式非 auto 宽度，避开 shrink-to-fit */
+    max-width: 230px;
+    padding: 12px 14px;
+    border-radius: 20px; /* 大圆角 */
+    background: #eef6ff;
+    border: 1px solid #d3e6ff;
+    box-shadow: 0 8px 20px rgba(59, 130, 246, 0.14);
+    color: #1e3a5f;
+    font-family: "MiSans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei",
+      system-ui, sans-serif; /* 圆体字 */
     font-size: 14px;
     line-height: 1.5;
-    color: var(--deep-text);
     display: flex;
     align-items: center;
     gap: 6px;
@@ -126,64 +132,77 @@
       transform var(--duration-medium) var(--ease-decelerate),
       visibility var(--duration-medium);
   }
-  .coze-bubble > span { flex: 1 1 auto; } /* 文案占满，× 靠右 */
+  html.dark .coze-bubble {
+    background: #1d2942;
+    border-color: #2e3c5e;
+    color: #e2e8f0;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  }
+  .coze-bubble > span { flex: 1 1 auto; line-height: 1.5; } /* 文案占满，× 靠右 */
   .coze-bubble-never {
     flex-basis: 100%; /* 独立一行，右对齐 */
     padding: 0;
     border: none;
     background: none;
-    color: var(--content-meta);
+    color: inherit;
+    opacity: 0.55;
     font-size: 12px;
     text-align: right;
     cursor: pointer;
-    transition: color var(--duration-fast) var(--ease-standard);
+    transition: opacity var(--duration-fast) var(--ease-standard);
   }
-  .coze-bubble-never:hover { color: var(--primary); }
+  .coze-bubble-never:hover { opacity: 1; }
 
   .coze-bubble.coze-bubble-show {
     opacity: 1;
     visibility: visible;
     transform: translateY(0) scale(1);
   }
-  /* 尾巴：指向悬浮球 */
+  /* 尾巴：指向悬浮球（09 模板：right 20px / 14px 方块） */
   .coze-bubble::after {
     content: "";
     position: absolute;
-    right: 28px; /* 与悬浮球中心对齐 */
-    bottom: -6px;
-    width: 12px;
-    height: 12px;
-    background: var(--card-bg);
-    border-right: 1px solid var(--line-divider);
-    border-bottom: 1px solid var(--line-divider);
+    right: 20px;
+    bottom: -8px;
+    width: 14px;
+    height: 14px;
+    background: #eef6ff;
+    border-right: 1px solid #d3e6ff;
+    border-bottom: 1px solid #d3e6ff;
     transform: rotate(45deg);
+  }
+  html.dark .coze-bubble::after {
+    background: #1d2942;
+    border-color: #2e3c5e;
   }
   .coze-bubble-close {
     flex-shrink: 0;
-    width: 20px;
-    height: 20px;
     border: none;
     background: none;
-    border-radius: var(--radius-full);
-    color: var(--content-meta);
-    font-size: 16px;
+    padding: 2px;
+    font-size: 15px;
     line-height: 1;
     cursor: pointer;
-    transition: background var(--duration-fast) var(--ease-standard);
+    color: inherit;
+    opacity: 0.45;
+    transition: opacity var(--duration-fast) var(--ease-standard);
   }
-  .coze-bubble-close:hover {
-    background: var(--btn-plain-bg-hover);
-    color: var(--primary);
-  }
+  .coze-bubble-close:hover { opacity: 1; }
 
-  /* --- 移动端 --- */
+  /* --- 移动端（48px 球等比缩放） --- */
   @media (max-width: 768px) {
     .coze-hitbox { width: 48px; height: 32px; }
     .coze-ball { width: 48px; height: 48px; transform: translateY(24px); }
     .coze-hitbox:hover .coze-ball,
     .coze-ball:focus-visible { transform: translateY(-12px); }
-    .coze-widget.coze-has-bubble .coze-ball { transform: translateY(24px); }
-    .coze-bubble { bottom: 56px; max-width: 180px; }
+    .coze-widget.coze-has-bubble .coze-ball { transform: translateY(-12px); }
+    .coze-bubble {
+      right: 24px;
+      bottom: 40px; /* 尾巴对准弹出后的 48px 球顶 */
+      width: max-content;
+      max-width: 190px;
+    }
+    .coze-bubble::after { right: 14px; }
   }
   /* 触摸设备没有 hover → 直接完整露出 */
   @media (hover: none) and (pointer: coarse) {
