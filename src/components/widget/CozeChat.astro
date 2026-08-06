@@ -13,6 +13,10 @@
  * - 聊天窗中文 UI（ui.base.lang = zh-CN），覆盖硬编码英文标题，隐藏底部「扣子」链接
  * - 聊天窗亮/暗跟随博客主题：监听 html.dark，给 body 设 theme-mode 属性（SDK Semi 暗色变量机制）
  * - 聊天窗 z-index 1020（高于 FloatingControls 1000 / FloatingTOC 1001）；Swup 切页后重置浮窗状态
+ * - 脚本带 data-swup-ignore-script：SwupScriptsPlugin 每次切页会重跑全文档无豁免标记的 <script>，
+ *   重跑会让 cozeClient 归零 + initCozeChat 走 requestIdleCallback 分支（readyState 已 complete）抛错，
+ *   悬浮球因此绑定到空客户端打不开聊天窗。此标记让浮窗独立于页面、只初始化一次。
+ *   同理 requestIdleCallback 第二参必须传 { timeout } 字典（传数字会抛 Argument 2 错）。
  *
  * 依赖: Coze Web SDK (https://lf-cdn.coze.cn/obj/unpkg/flow-platform/chat-app-sdk/)
  */
@@ -214,7 +218,7 @@
   }
 </style>
 
-<script is:inline>
+<script is:inline data-swup-ignore-script>
   (function () {
     // ===== 配置 =====
     var BOT_ID = "7664222715091370036";
@@ -528,7 +532,12 @@
       document.addEventListener("DOMContentLoaded", initCozeChat);
     } else {
       // 用 requestIdleCallback 或 setTimeout 延迟，确保不干扰首屏
-      (window.requestIdleCallback || setTimeout)(initCozeChat, 500);
+      // 注意：requestIdleCallback 第二参必须是 options 字典（{ timeout }），传数字会抛 TypeError
+      if (window.requestIdleCallback) {
+        window.requestIdleCallback(initCozeChat, { timeout: 500 });
+      } else {
+        setTimeout(initCozeChat, 500);
+      }
     }
   })();
 </script>
