@@ -108,7 +108,11 @@ export default defineConfig({
 			cache: true,
 			preload: true,
 			accessibility: true,
-			updateHead: true,
+			// Coze SDK 初始化时会动态注入大量 <style> 到 <head>（含聊天窗 position:fixed 等关键样式）。
+			// SwupHeadPlugin 切页会用新页面的 head 替换当前 head，若不保留这些运行时样式，切页后聊天窗会失去
+			// fixed 定位、从右下角退化到页面左上角（表现为"打不开"）。persistTags: "style" 让所有内联
+			// <style> 跨页存活（博客自身页面特异样式都是 scoped 的 data-astro-cid-* / svelte-*，保留无副作用）。
+			updateHead: { persistTags: "style" },
 			updateBodyClass: false,
 			globalInstance: true,
 			// 滚动相关配置优化
