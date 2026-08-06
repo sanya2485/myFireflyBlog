@@ -52,7 +52,7 @@ jobs:
           strip_components: 2
           rm: true
 
-      - name: 🔄 Test & reload nginx
+      - name: 🔄 Restart container to pick up new config
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -63,10 +63,13 @@ jobs:
             echo "🧪 确保配置目录存在..."
             mkdir -p /root/cc/nginx/conf
 
-            echo "🧪 测试 nginx 配置..."
-            docker exec myFireflyBlog nginx -t
+            echo "🧪 用临时容器校验新配置语法..."
+            docker run --rm \
+              -v /root/cc/nginx/conf/default.conf:/etc/nginx/conf.d/default.conf:ro \
+              -v /root/cc/nginx/ssl:/etc/nginx/ssl:ro \
+              nginx:alpine nginx -t
 
-            echo "🔄 重新加载 nginx..."
-            docker exec myFireflyBlog nginx -s reload
+            echo "🔄 重启博客容器（SCP 创建了新 inode，须重启才能重新挂载）..."
+            docker restart myFireflyBlog
 
             echo "✅ Nginx 配置更新完成"

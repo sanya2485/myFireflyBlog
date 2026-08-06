@@ -1,6 +1,6 @@
 # ============================================
 # myFireflyBlog — nginx 生产配置
-# 域名:     www.sanyablog.cn
+# 域名:     www.sanyablog.cn（裸域 sanyablog.cn 301 → www）
 # HTTPS:    Let's Encrypt / 阿里云免费证书
 # 管理方式: 通过 deploy-nginx.yml workflow 独立部署
 # 路径:     /root/cc/nginx/conf/default.conf
@@ -18,6 +18,19 @@ server {
 
     # 301 永久重定向到 HTTPS
     return 301 https://$host$request_uri;
+}
+
+# ============================================
+# HTTP → HTTPS 重定向（裸域 sanyablog.cn → www）
+# 证书 SAN 已同时覆盖 sanyablog.cn 与 www.sanyablog.cn，复用同一份证书
+# ============================================
+server {
+    listen       80;
+    listen  [::]:80;
+    server_name  sanyablog.cn;
+
+    # 直接一步跳到 www，避免二次跳转
+    return 301 https://www.sanyablog.cn$request_uri;
 }
 
 # ============================================
@@ -123,26 +136,9 @@ server {
     # 博客容器与后端容器通过 coze-net 共享 Docker 网络互联，
     # 使用容器名 coze-gateway:8080 通信。
     #
-    # 创建共享网络:
-    #   docker network create coze-net
-    #   docker network connect coze-net myFireflyBlog
-    #
-    # 后端容器需在 coze-net 网络中启动:
-    #   docker run -d --name coze-gateway --network coze-net ...
-    #
-    # IP 白名单: Nginx 层 allow/deny 硬拦截
-    #   ${DEV_MACHINE_IP}      开发机网段（由 Secret 注入）
-    #   ${SERVER_HOST}         本服务器（由 GitHub Secret 注入）
-    #   127.0.0.1 / ::1         localhost（固定）
+    # 认证方式: 后端 OAuth JWT Token，Nginx 层不再做 IP 白名单拦截。
     # ============================================
     location /api/coze/ {
-        # ---- IP 白名单（Nginx 层硬拦截） ----
-        allow 127.0.0.1;
-        allow ::1;
-        allow ${SERVER_HOST};        # 博客服务器 IP（从 Secret 注入）
-        allow ${DEV_MACHINE_IP};     # 开发机网段（从 Secret 注入）
-        deny all;                     # 其他 IP → 403 Forbidden
-
         # ---- 反向代理到后端 ----
         proxy_pass http://coze-gateway:8080;
         proxy_set_header Host $host;
@@ -160,4 +156,27 @@ server {
     location ~ /\. {
         deny all;
     }
+}
+
+# ============================================
+# HTTPS 裸域 → www 重定向
+# 放在主 HTTPS 块之后，避免影响 IP 直连时默认回落（第一个 443 块）的行为
+# 复用 www.sanyablog.cn 证书（SAN 已覆盖裸域）
+# ============================================
+server {
+    listen       443 ssl;
+    listen  [::]:443 ssl;
+    http2 on;
+    server_name  sanyablog.cn;
+
+    ssl_certificate     /etc/nginx/ssl/www.sanyablog.cn.pem;
+    ssl_certificate_key /etc/nginx/ssl/www.sanyablog.cn.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    # 301 永久重定向到 www
+    return 301 https://www.sanyablog.cn$request_uri;
 }
