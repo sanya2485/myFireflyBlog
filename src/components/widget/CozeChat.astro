@@ -101,11 +101,15 @@
     transition: opacity var(--duration-normal) var(--ease-standard);
   }
 
-  /* --- 问候气泡（模板 09：圆体大圆角，浅蓝卡片） ---
-     浅蓝主色照 09 模板；暗色模式用 html.dark 覆盖为深蓝灰。
+  /* --- 问候气泡（模板 09：圆体大圆角，主题色卡片） ---
+     底色/描边用 color-mix 以 --primary 调出淡主题色（跟随站点主题色相 --hue，
+     含用户自选主题色）；底色随 --card-bg、描边随 --line-divider 自动适配亮暗，
+     仅文字色需 html.dark 覆盖（--deep-text 在暗色下仍是深色值）。
      必须显式 width:max-content：容器 width:0 下仅设 right 的绝对定位子元素
      会 shrink-to-fit 坍缩成 ~58px 窄条（此前"字体难看"的根因）。 */
   .coze-bubble {
+    --bubble-bg: color-mix(in oklab, var(--primary) 10%, var(--card-bg));
+    --bubble-border: color-mix(in oklab, var(--primary) 30%, var(--line-divider));
     position: absolute;
     right: 32px; /* 悬浮球左上方 */
     bottom: 84px;
@@ -113,10 +117,13 @@
     max-width: 230px;
     padding: 12px 14px;
     border-radius: 20px; /* 大圆角 */
-    background: #eef6ff;
-    border: 1px solid #d3e6ff;
-    box-shadow: 0 8px 20px rgba(59, 130, 246, 0.14);
-    color: #1e3a5f;
+    background: var(--btn-regular-bg); /* 不支持 color-mix 时的降级 */
+    background: var(--bubble-bg);
+    border: 1px solid var(--line-divider); /* 降级 */
+    border: 1px solid var(--bubble-border);
+    box-shadow: var(--shadow-md); /* 降级 */
+    box-shadow: 0 8px 20px color-mix(in oklab, var(--primary) 16%, transparent);
+    color: var(--deep-text);
     font-family: "MiSans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei",
       system-ui, sans-serif; /* 圆体字 */
     font-size: 14px;
@@ -132,12 +139,7 @@
       transform var(--duration-medium) var(--ease-decelerate),
       visibility var(--duration-medium);
   }
-  html.dark .coze-bubble {
-    background: #1d2942;
-    border-color: #2e3c5e;
-    color: #e2e8f0;
-    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
-  }
+  html.dark .coze-bubble { color: var(--btn-content); } /* 暗色用浅主题色文字 */
   .coze-bubble > span { flex: 1 1 auto; line-height: 1.5; } /* 文案占满，× 靠右 */
   .coze-bubble-never {
     flex-basis: 100%; /* 独立一行，右对齐 */
@@ -166,14 +168,13 @@
     bottom: -8px;
     width: 14px;
     height: 14px;
-    background: #eef6ff;
-    border-right: 1px solid #d3e6ff;
-    border-bottom: 1px solid #d3e6ff;
+    background: var(--btn-regular-bg); /* 降级 */
+    background: var(--bubble-bg);
+    border-right: 1px solid var(--line-divider); /* 降级 */
+    border-right: 1px solid var(--bubble-border);
+    border-bottom: 1px solid var(--line-divider); /* 降级 */
+    border-bottom: 1px solid var(--bubble-border);
     transform: rotate(45deg);
-  }
-  html.dark .coze-bubble::after {
-    background: #1d2942;
-    border-color: #2e3c5e;
   }
   .coze-bubble-close {
     flex-shrink: 0;
