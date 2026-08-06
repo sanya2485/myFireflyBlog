@@ -8,10 +8,189 @@
  * - 检测 403（IP 白名单拦截）和 503（额度耗尽）并降级提示
  * - 访客隔离（基于 localStorage 维持 visitor ID）
  * - 定时 token 刷新由后端 TokenRefreshService 完成，前端 onRefreshToken 仅取最新 token
+ * - 自建悬浮球：右下角半隐藏，悬停跳出动画；点击打开聊天窗（SDK 默认悬浮球已隐藏）
+ * - 问候气泡「hi~请问有什么问题吗？」：每次打开都弹；× 仅本次关闭 / 3s 自动关；点「不再显示」永久停用（localStorage 记住）
+ * - 聊天窗中文 UI（ui.base.lang = zh-CN），覆盖硬编码英文标题，隐藏底部「扣子」链接
  *
  * 依赖: Coze Web SDK (https://lf-cdn.coze.cn/obj/unpkg/flow-platform/chat-app-sdk/)
  */
 ---
+
+<!-- ===== 自建悬浮球 + 问候气泡（SDK 悬浮球已隐藏：ui.asstBtn.isNeed = false） ===== -->
+<div id="coze-widget" class="coze-widget">
+  <!-- 问候气泡：位于悬浮球上方，带指向球的尾巴 -->
+  <div id="coze-bubble" class="coze-bubble" role="status">
+    <span>hi~请问有什么问题吗？</span>
+    <button id="coze-bubble-close" class="coze-bubble-close" type="button" aria-label="关闭">×</button>
+    <button id="coze-bubble-never" class="coze-bubble-never" type="button">不再显示</button>
+  </div>
+  <!-- 悬浮球：默认半隐藏，悬停跳出。
+       hover 判定框（.coze-hitbox）固定不动，覆盖球静止时的可见条带；
+       球本体只做视觉位移。这样动画途中鼠标始终停留在判定框内，
+       不会因为球上移脱离鼠标而反复"弹出-缩回"抖动。 -->
+  <div id="coze-hitbox" class="coze-hitbox">
+    <button id="coze-ball" class="coze-ball" type="button" aria-label="打开 AI 助手">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<style is:global>
+  /* ===== 自建悬浮球 + 问候气泡 =====
+     主题变量来自 src/styles/variables.styl；暗色模式靠 html.dark 自动切换 */
+  .coze-widget {
+    position: fixed;
+    right: 1rem;
+    bottom: 0;
+    width: 0;
+    height: 0;
+    z-index: 1010; /* 高于 FloatingControls/SDK 容器(1000)，低于 Toast(9999) */
+    pointer-events: none; /* 容器不拦截点击，子元素各自可点 */
+  }
+  .coze-widget .coze-hitbox,
+  .coze-widget .coze-bubble { pointer-events: auto; }
+
+  /* --- 悬浮球：半隐藏于右下角 ---
+     hover 判定框（.coze-hitbox）固定不动，覆盖球静止时的可见条带；
+     球本体只做视觉位移。动画途中鼠标始终停留在判定框内，
+     不会因球上移脱离鼠标而反复"弹出-缩回"抖动。 */
+  .coze-hitbox {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 56px;
+    height: 40px; /* 覆盖静止条带(28px)+余量；顶不高过 FloatingControls(bottom:64px) */
+    pointer-events: auto;
+  }
+  .coze-ball {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 56px;
+    height: 56px;
+    transform: translateY(28px); /* 静止：下半截压出视口 = 只露上半 28px */
+    border-radius: var(--radius-full);
+    border: 1px solid var(--line-divider);
+    background: var(--card-bg);
+    color: var(--primary);
+    box-shadow: var(--shadow-button);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    will-change: transform;
+    transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1); /* 带回弹 = 跳出来 */
+  }
+  .coze-hitbox:hover .coze-ball,
+  .coze-ball:focus-visible {
+    transform: translateY(-16px); /* 弹出：完整可见，底部留 16px */
+  }
+  .coze-hitbox:active .coze-ball { transform: translateY(-16px) scale(0.9); }
+
+  /* 气泡显示期间，球保持静止位（避免撞到气泡） */
+  .coze-widget.coze-has-bubble .coze-ball { transform: translateY(28px); }
+
+  /* 聊天窗打开 → 整组隐藏（onShow/onHide 切换） */
+  .coze-widget.coze-chat-open {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--duration-normal) var(--ease-standard);
+  }
+
+  /* --- 问候气泡 --- */
+  .coze-bubble {
+    position: absolute;
+    right: 0;
+    bottom: 64px; /* 位于悬浮球上方 */
+    max-width: 220px;
+    padding: 10px 14px;
+    border-radius: var(--radius-xl);
+    background: var(--card-bg);
+    border: 1px solid var(--line-divider);
+    box-shadow: var(--shadow-button);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--deep-text);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap; /* 允许「不再显示」换行到第二行 */
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(8px) scale(0.96);
+    transition: opacity var(--duration-medium) var(--ease-standard),
+      transform var(--duration-medium) var(--ease-decelerate),
+      visibility var(--duration-medium);
+  }
+  .coze-bubble > span { flex: 1 1 auto; } /* 文案占满，× 靠右 */
+  .coze-bubble-never {
+    flex-basis: 100%; /* 独立一行，右对齐 */
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--content-meta);
+    font-size: 12px;
+    text-align: right;
+    cursor: pointer;
+    transition: color var(--duration-fast) var(--ease-standard);
+  }
+  .coze-bubble-never:hover { color: var(--primary); }
+
+  .coze-bubble.coze-bubble-show {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0) scale(1);
+  }
+  /* 尾巴：指向悬浮球 */
+  .coze-bubble::after {
+    content: "";
+    position: absolute;
+    right: 28px; /* 与悬浮球中心对齐 */
+    bottom: -6px;
+    width: 12px;
+    height: 12px;
+    background: var(--card-bg);
+    border-right: 1px solid var(--line-divider);
+    border-bottom: 1px solid var(--line-divider);
+    transform: rotate(45deg);
+  }
+  .coze-bubble-close {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    border: none;
+    background: none;
+    border-radius: var(--radius-full);
+    color: var(--content-meta);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease-standard);
+  }
+  .coze-bubble-close:hover {
+    background: var(--btn-plain-bg-hover);
+    color: var(--primary);
+  }
+
+  /* --- 移动端 --- */
+  @media (max-width: 768px) {
+    .coze-hitbox { width: 48px; height: 32px; }
+    .coze-ball { width: 48px; height: 48px; transform: translateY(24px); }
+    .coze-hitbox:hover .coze-ball,
+    .coze-ball:focus-visible { transform: translateY(-12px); }
+    .coze-widget.coze-has-bubble .coze-ball { transform: translateY(24px); }
+    .coze-bubble { bottom: 56px; max-width: 180px; }
+  }
+  /* 触摸设备没有 hover → 直接完整露出 */
+  @media (hover: none) and (pointer: coarse) {
+    .coze-ball { transform: translateY(-16px); }
+    .coze-widget.coze-has-bubble .coze-ball { transform: translateY(-16px); }
+  }
+</style>
 
 <script is:inline>
   (function () {
@@ -19,6 +198,12 @@
     var BOT_ID = "7664222715091370036";
     var API_BASE = "/api/coze";
     var SDK_URL = "https://lf-cdn.coze.cn/obj/unpkg/flow-platform/chat-app-sdk/1.2.0-beta.19/libs/cn/index.js";
+
+    // ===== 自建浮窗状态 =====
+    var cozeClient = null;       // WebChatClient 实例（构造成功后赋值）
+    var cozeSdkFailed = false;   // SDK 加载失败标记
+    var cozeInitFailed = false;  // 初始化失败标记（token/会话）
+    var GREETING_KEY = "coze_greeting_off"; // 用户点「不再显示」后置位；未置位则每次打开都弹（须在 clearCozeSessionCache 白名单中）
 
     // ===== 访客 ID（跨会话关联，持久化到 localStorage） =====
     var visitorId = localStorage.getItem("coze_visitor_id");
@@ -37,10 +222,82 @@
           keysToRemove.push(key);
         }
       }
-      keysToRemove = keysToRemove.filter(function (k) { return k !== "coze_visitor_id"; });
+      keysToRemove = keysToRemove.filter(function (k) {
+        return k !== "coze_visitor_id" && k !== GREETING_KEY;
+      });
       keysToRemove.forEach(function (k) { localStorage.removeItem(k); });
     }
     clearCozeSessionCache();
+
+    // ===== 问候气泡（每次打开都弹；× 仅本次关闭 / 3s 自动关；「不再显示」永久停用） =====
+    function closeGreeting() {
+      var bubble = document.getElementById("coze-bubble");
+      var w = document.getElementById("coze-widget");
+      if (bubble) bubble.classList.remove("coze-bubble-show");
+      if (w) w.classList.remove("coze-has-bubble");
+    }
+
+    function maybeShowGreeting() {
+      if (localStorage.getItem(GREETING_KEY)) return; // 已点「不再显示」→ 不再弹出
+      var bubble = document.getElementById("coze-bubble");
+      var w = document.getElementById("coze-widget");
+      if (!bubble || !w) return;
+      bubble.classList.add("coze-bubble-show");
+      w.classList.add("coze-has-bubble");
+
+      var timer = setTimeout(closeGreeting, 3000); // 3s 自动关闭（仅本次，下次仍弹）
+
+      var closeBtn = document.getElementById("coze-bubble-close");
+      if (closeBtn) {
+        closeBtn.addEventListener("click", function () {
+          clearTimeout(timer); // ×：仅本次关闭，下次仍弹
+          closeGreeting();
+        });
+      }
+      var neverBtn = document.getElementById("coze-bubble-never");
+      if (neverBtn) {
+        neverBtn.addEventListener("click", function () {
+          clearTimeout(timer);
+          localStorage.setItem(GREETING_KEY, "1"); // 「不再显示」：记住并永久停用
+          closeGreeting();
+        });
+      }
+    }
+
+    // ===== 聊天窗 onShow/onHide：切换自建浮窗整组显隐 =====
+    function onChatShow() {
+      closeGreeting(); // 开聊天窗时连气泡一起收掉
+      var w = document.getElementById("coze-widget");
+      if (w) w.classList.add("coze-chat-open");
+    }
+
+    function onChatHide() {
+      var w = document.getElementById("coze-widget");
+      if (w) w.classList.remove("coze-chat-open"); // 关聊天窗 → 悬浮球重新出现
+    }
+
+    // ===== 悬浮球点击 =====
+    function bindCozeWidget() {
+      // 点击判定绑在不移动的 hitbox 上（覆盖球+上方小区域），球是其子元素，点击会冒泡上来
+      var zone = document.getElementById("coze-hitbox") || document.getElementById("coze-ball");
+      if (!zone) return;
+      zone.addEventListener("click", function () {
+        if (cozeClient) {
+          onChatShow(); // 先隐藏球，避免与 SDK 容器同屏重叠
+          try {
+            cozeClient.showChatBot();
+          } catch (e) {
+            console.error("[Coze] showChatBot 失败:", e);
+            onChatHide();
+            showCozeToast("AI 助手暂时不可用", "error");
+          }
+        } else if (cozeSdkFailed || cozeInitFailed) {
+          showCozeToast("AI 助手暂时不可用，请稍后重试", "error");
+        } else {
+          showCozeToast("AI 助手加载中，请稍候…", "warning");
+        }
+      });
+    }
 
     // ===== Token 获取/刷新 =====
     function fetchToken(endpoint, userId) {
@@ -81,6 +338,7 @@
       script.async = true;
       script.onload = callback;
       script.onerror = function () {
+        cozeSdkFailed = true;
         console.warn("[Coze] SDK 加载失败，AI 助手不可用");
       };
       document.head.appendChild(script);
@@ -158,7 +416,7 @@
         loadCozeSDK(function () {
           fetchToken("/token/init", userId)
             .then(function (token) {
-              new CozeWebSDK.WebChatClient({
+              cozeClient = new CozeWebSDK.WebChatClient({
                 config: { bot_id: BOT_ID },
                 auth: {
                   type: "token",
@@ -169,12 +427,16 @@
                 },
                 userInfo: { id: userId, nickname: "Visitors" },
                 ui: {
-                  asstBtn: { isNeed: true },
-                  chatBot: { title: "AI 助手" },
+                  base: { lang: "zh-CN", zIndex: 1000 }, // 全中文 UI + 显式层级
+                  asstBtn: { isNeed: false },             // 隐藏 SDK 悬浮球，改用自建球
+                  header: { isShow: true, isNeedClose: true, title: "AI 助手" },
+                  footer: { isShow: false },              // 去掉底部「扣子」链接
+                  chatBot: { title: "AI 助手", onShow: onChatShow, onHide: onChatHide },
                 },
               });
             })
             .catch(function (err) {
+              cozeInitFailed = true;
               if (err.message === "IP_FORBIDDEN") {
                 showCozeToast("AI 助手暂时不可用（网络限制）", "error");
               } else if (err.message === "QUOTA_EXHAUSTED") {
@@ -186,6 +448,10 @@
         });
       });
     }
+
+    // ===== 绑定自建浮窗 + 首次访问问候（模板已渲染，立即执行，函数内有 null 保护） =====
+    bindCozeWidget();
+    maybeShowGreeting();
 
     // 页面加载完成后初始化（不阻塞 DOM 渲染）
     if (document.readyState === "loading") {
