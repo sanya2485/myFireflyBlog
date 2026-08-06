@@ -11,6 +11,8 @@
  * - 自建悬浮球：右下角半隐藏，悬停跳出动画；点击打开聊天窗（SDK 默认悬浮球已隐藏）
  * - 问候气泡「hi~请问有什么问题吗？」：每次打开都弹；× 仅本次关闭 / 3s 自动关；点「不再显示」永久停用（localStorage 记住）
  * - 聊天窗中文 UI（ui.base.lang = zh-CN），覆盖硬编码英文标题，隐藏底部「扣子」链接
+ * - 聊天窗亮/暗跟随博客主题：监听 html.dark，给 body 设 theme-mode 属性（SDK Semi 暗色变量机制）
+ * - 聊天窗 z-index 1020（高于 FloatingControls 1000 / FloatingTOC 1001）；Swup 切页后重置浮窗状态
  *
  * 依赖: Coze Web SDK (https://lf-cdn.coze.cn/obj/unpkg/flow-platform/chat-app-sdk/)
  */
@@ -413,6 +415,54 @@
       showCozeToast("AI 助手额度已用尽，请联系管理员", "warning");
     });
 
+    // ===== 聊天窗亮/暗跟随博客主题 =====
+    // SDK 无内置暗色开关，但它的 Semi 样式系统支持 body[theme-mode=dark]（逆向 SDK 确认：
+    // 亮/暗两套 --coze-chat-sdk-semi-* 变量分别挂在 body 与 body[theme-mode=dark] 下）。
+    // 博客主题挂在 html.dark（手动切换/system 模式都改 classList），用 MutationObserver
+    // 监听 html 的 class，比依赖 theme-change 事件可靠（手动切换不会派发该事件）。
+    function syncCozeTheme() {
+      var isDark = document.documentElement.classList.contains("dark");
+      if (isDark) {
+        document.body.setAttribute("theme-mode", "dark");
+      } else {
+        document.body.removeAttribute("theme-mode");
+      }
+    }
+    var themeObserver = new MutationObserver(syncCozeTheme);
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+    syncCozeTheme(); // 初始化（html.dark 已由 Layout.astro 设好）
+
+    // ===== Swup SPA 导航后重置浮窗状态 =====
+    // 浮窗/SDK 容器都在 #swup-container 之外，跨页存活；若聊天窗开着时切页，
+    // coze-chat-open 会残留 → 悬浮球永久消失。content:replace 后强制收起聊天窗并同步主题。
+    function resetCozeOnNavigate() {
+      var w = document.getElementById("coze-widget");
+      if (w && w.classList.contains("coze-chat-open")) {
+        w.classList.remove("coze-chat-open");
+        if (cozeClient) {
+          try {
+            cozeClient.hideChatBot();
+          } catch (e) {
+            console.error("[Coze] hideChatBot 失败:", e);
+          }
+        }
+      }
+      syncCozeTheme();
+    }
+    // 注册 swup hook（swup 可能比本脚本晚初始化，沿用 Twikoo/Navbar 的兜底模式）
+    if (window.swup && window.swup.hooks) {
+      window.swup.hooks.on("content:replace", resetCozeOnNavigate);
+    } else {
+      document.addEventListener("swup:enable", function () {
+        if (window.swup && window.swup.hooks) {
+          window.swup.hooks.on("content:replace", resetCozeOnNavigate);
+        }
+      });
+    }
+
     // ===== 初始化后端会话（Plan B: Redis 会话映射） =====
     // 返回 { sessionId }，或 null（兜底使用本地 visitorId）
     function initSession() {
@@ -447,7 +497,7 @@
                 },
                 userInfo: { id: userId, nickname: "Visitors" },
                 ui: {
-                  base: { lang: "zh-CN", zIndex: 1000 }, // 全中文 UI + 显式层级
+                  base: { lang: "zh-CN", zIndex: 1020 }, // 全中文 UI + 高于 FloatingControls(1000)/FloatingTOC(1001)
                   asstBtn: { isNeed: false },             // 隐藏 SDK 悬浮球，改用自建球
                   header: { isShow: true, isNeedClose: true, title: "AI 助手" },
                   footer: { isShow: false },              // 去掉底部「扣子」链接
