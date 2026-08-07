@@ -11,7 +11,7 @@ export const musicPlayerConfig: MusicPlayerConfig = {
 	showInNavbar: true,
 
 	// 使用方式："meting" 使用 Meting API，"local" 使用本地音乐列表
-	mode: "meting",
+	mode: "local",
 
 	// 默认音量 (0-1)
 	volume: 0.7,
@@ -50,10 +50,80 @@ export const musicPlayerConfig: MusicPlayerConfig = {
 	local: {
 		playlist: [
 			{
-				name: "使一颗心免于哀伤",
-				artist: "知更鸟 / HOYO-MiX / Chevy",
-				url: "/assets/music/使一颗心免于哀伤-哼唱.mp3",
-				cover: "/assets/music/cover/109951169585655912.webp",
+				name: "ささぶね",
+				artist: "Foxtail-Grass Studio",
+				url: "/assets/music/track-01.mp3",
+				cover: "/assets/music/cover/track-01.webp",
+				lrc: "",
+			},
+			{
+				name: "メグリネ",
+				artist: "Foxtail-Grass Studio",
+				url: "/assets/music/track-02.mp3",
+				cover: "/assets/music/cover/track-02.webp",
+				lrc: "",
+			},
+			{
+				name: "Around The World",
+				artist: "m.o.v.e",
+				url: "/assets/music/track-03.mp3",
+				cover: "/assets/music/cover/track-03.webp",
+				lrc: "",
+			},
+			{
+				name: "Running In The “90S”",
+				artist: "Max Coveri",
+				url: "/assets/music/track-04.mp3",
+				cover: "/assets/music/cover/track-04.webp",
+				lrc: "",
+			},
+			{
+				name: "Flowering Night",
+				artist: "Re:Volte",
+				url: "/assets/music/track-05.mp3",
+				cover: "/assets/music/cover/track-05.webp",
+				lrc: "",
+			},
+			{
+				name: "Limen",
+				artist: "Silentroom",
+				url: "/assets/music/track-06.mp3",
+				cover: "/assets/music/cover/track-06.webp",
+				lrc: "",
+			},
+			{
+				name: "云流れ",
+				artist: "みかん箱/Foxtail-Grass Studio",
+				url: "/assets/music/track-07.mp3",
+				cover: "/assets/music/cover/track-07.webp",
+				lrc: "",
+			},
+			{
+				name: "New Kings",
+				artist: "遠藤幹雄",
+				url: "/assets/music/track-08.mp3",
+				cover: "/assets/music/cover/track-08.webp",
+				lrc: "",
+			},
+			{
+				name: "Showdown",
+				artist: "遠藤幹雄",
+				url: "/assets/music/track-09.mp3",
+				cover: "/assets/music/cover/track-09.webp",
+				lrc: "",
+			},
+			{
+				name: "雨の日の出来事",
+				artist: "佐藤聡美",
+				url: "/assets/music/track-10.mp3",
+				cover: "/assets/music/cover/track-10.webp",
+				lrc: "",
+			},
+			{
+				name: "ヨスガノソラ メインテーマ -遠い空へ-",
+				artist: "三輪学",
+				url: "/assets/music/track-11.mp3",
+				cover: "/assets/music/cover/track-11.webp",
 				lrc: "",
 			},
 		],
