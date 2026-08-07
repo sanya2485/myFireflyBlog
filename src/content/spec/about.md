@@ -6,7 +6,7 @@
 
 这个博客使用 **Astro** 框架和 [Firefly](https://github.com/CuteLeaf/Firefly) 主题构建，记录技术学习、生活思考和日常点滴。
 
-**🏠我的博客： [https://blog.cuteleaf.cn](https://blog.cuteleaf.cn/)**
+**🏠我的博客： [https://www.sanyablog.cn](https://www.sanyablog.cn)**
 
 ---
 
