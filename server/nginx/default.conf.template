@@ -151,6 +151,23 @@ server {
     }
 
     # ============================================
+    # 私有 PyPI（pypi-server）
+    #
+    # 博客容器与 pypi-server 通过 coze-net 共享 Docker 网络互联，
+    # 使用容器名 pypi-server:8081 通信。
+    #
+    # 认证方式: pypi-server 自身 htpasswd（-P），本层透传 Authorization 头。
+    # 访问形态: https://<domain>/pypi/simple/ 及 twine 上传到 /pypi/
+    # ============================================
+    location /pypi/ {
+        proxy_pass http://pypi-server:8081/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # ============================================
     # 安全：禁止访问隐藏文件
     # ============================================
     location ~ /\. {
