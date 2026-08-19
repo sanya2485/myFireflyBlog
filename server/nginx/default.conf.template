@@ -9,6 +9,13 @@
 # ============================================
 
 # ============================================
+# 文件下载限流（http 级 zone 定义）
+# 同一 IP 对 /files/ 下载请求的平均频率限制（防刷 / 防盗链）
+# zone: file_download，10m 内存 ≈ 可记录约 16 万个 IP
+# ============================================
+limit_req_zone $binary_remote_addr zone=file_download:10m rate=5r/s;
+
+# ============================================
 # HTTP → HTTPS 重定向
 # ============================================
 server {
@@ -113,6 +120,25 @@ server {
 
     # HTML 页面 — 禁止缓存（必须每次都从服务器获取最新内容）
     location ~* \.html$ {
+        add_header Cache-Control "no-store, must-revalidate";
+    }
+
+    # ============================================
+    # 文件下载（随文附件）
+    # /files/ 目录由宿主机 /root/cc/files 挂载（独立于 git 部署内容，
+    # 由 scripts/upload-files.sh 上传）。此处加两层限流：
+    #   1. 请求频率限流 —— 同 IP 平均 5 r/s，突发 20，超出返回 429
+    #   2. 下载速度限速 —— 前 8MB 全速，之后每连接限速 2MB/s
+    # 参数可按需调整（rate / burst / limit_rate / limit_rate_after）。
+    # ============================================
+    location /files/ {
+        limit_req zone=file_download burst=20 nodelay;
+        limit_req_status 429;
+
+        limit_rate_after 8m;
+        limit_rate 2m;
+
+        # 附件不缓存，确保每次下载都能拿到最新文件
         add_header Cache-Control "no-store, must-revalidate";
     }
 
