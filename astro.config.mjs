@@ -108,6 +108,10 @@ export default defineConfig({
 			cache: true,
 			preload: true,
 			accessibility: true,
+			// 随文附件下载链接（/files/...）不交给 Swup 处理：Swup 会把 zip 等二进制响应当作
+			// 页面导航去解析容器，导致下载不触发、页面过渡中断样式崩溃。
+			// linkSelector 排除 /files/ 前缀链接，让它们走原生浏览器行为（直接触发下载）。
+			linkSelector: "a[href]:not([href^='/files/'])",
 			// Coze SDK 初始化时会动态注入大量 <style> 到 <head>（含聊天窗 position:fixed 等关键样式）。
 			// SwupHeadPlugin 切页会用新页面的 head 替换当前 head，若不保留这些运行时样式，切页后聊天窗会失去
 			// fixed 定位、从右下角退化到页面左上角（表现为"打不开"）。persistTags: "style" 让所有内联
