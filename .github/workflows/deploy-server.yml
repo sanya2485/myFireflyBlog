@@ -86,6 +86,9 @@ jobs:
             fi
 
             # 随文附件：/root/cc/files → /files/（独立于 git 部署内容，由 scripts/upload-files.sh 上传）
+            # 注意：/usr/share/nginx/html 是只读挂载，/files 挂载点必须预先存在于宿主机
+            # （/root/cc/myFireflyBlog/files），否则 docker 无法在只读文件系统内创建挂载点
+            mkdir -p /root/cc/myFireflyBlog/files /root/cc/files
             docker run -d \
               --name myFireflyBlog \
               --add-host host.docker.internal:host-gateway \
