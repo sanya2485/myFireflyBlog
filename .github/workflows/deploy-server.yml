@@ -85,10 +85,12 @@ jobs:
               echo "  请先手动上传证书到 /root/cc/nginx/ssl/"
             fi
 
+            # 随文附件：/root/cc/files → /files/（独立于 git 部署内容，由 scripts/upload-files.sh 上传）
             docker run -d \
               --name myFireflyBlog \
               --add-host host.docker.internal:host-gateway \
               -v /root/cc/myFireflyBlog:/usr/share/nginx/html:ro \
+              -v /root/cc/files:/usr/share/nginx/html/files:ro \
               $CONFIG_MOUNT \
               $SSL_MOUNT \
               -p 80:80 \

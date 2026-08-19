@@ -16,6 +16,10 @@ pnpm-debug.log*
 # environment variables
 .env
 .env.production
+.env.local
+
+# blog post download attachments (uploaded to server via scripts/upload-files.sh, NOT via git)
+public/files/
 
 # macOS-specific files
 .DS_Store
