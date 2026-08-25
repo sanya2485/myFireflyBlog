@@ -1,25 +1,28 @@
 ---
 /**
- * CozeChat.astro — 博客 AI 助手浮窗（静态壳）+ AgentChat.svelte（自建聊天窗控制器）
+ * CozeChat.astro
+ * Coze AI 助手聊天浮窗 — 异步加载 Coze Web SDK，不阻塞页面渲染
  *
- * M3 重构：原实现直接用 Coze Web SDK 渲染聊天窗，SDK 不透传 function_call/tool_response，
- * 拿不到「对暗号」换取的每日 JWT。现改为：
- * - 本组件保留自建悬浮球 + 问候气泡（HTML/CSS 原样，跨页存活于 #swup-container 外）
- * - 聊天窗面板 + 全部逻辑交给 AgentChat.svelte（client:load 一次性挂载，无内联脚本，
- *   不受 SwupScriptsPlugin 切页重跑影响）
- * - 双 agent（Coze 博客助手 + Dify 智库）并行状态，点击切换；对暗号 → 解析 tool_response
- *   取得每日 JWT → 解锁 Dify（大闸门）
+ * 功能:
+ * - 从后端获取/刷新 access_token
+ * - 检测 403（IP 白名单拦截）和 503（额度耗尽）并降级提示
+ * - 访客隔离（基于 localStorage 维持 visitor ID）
+ * - 定时 token 刷新由后端 TokenRefreshService 完成，前端 onRefreshToken 仅取最新 token
+ * - 自建悬浮球：右下角半隐藏，悬停跳出动画；点击打开聊天窗（SDK 默认悬浮球已隐藏）
+ * - 问候气泡「hi~请问有什么问题吗？」：每次打开都弹；× 仅本次关闭 / 3s 自动关；点「不再显示」永久停用（localStorage 记住）
+ * - 聊天窗中文 UI（ui.base.lang = zh-CN），覆盖硬编码英文标题，隐藏底部「扣子」链接
+ * - 聊天窗固定用 SDK 默认亮色主题（曾实现跟随博客亮/暗：给 body 设 theme-mode 属性，会污染全站样式，已回退）
+ * - 聊天窗 z-index 1020（高于 FloatingControls 1000 / FloatingTOC 1001）；Swup 切页后重置浮窗状态
+ * - 脚本带 data-swup-ignore-script：SwupScriptsPlugin 每次切页会重跑全文档无豁免标记的 <script>，
+ *   重跑会让 cozeClient 归零 + initCozeChat 走 requestIdleCallback 分支（readyState 已 complete）抛错，
+ *   悬浮球因此绑定到空客户端打不开聊天窗。此标记让浮窗独立于页面、只初始化一次。
+ *   同理 requestIdleCallback 第二参必须传 { timeout } 字典（传数字会抛 Argument 2 错）。
  *
- * 依赖: AgentChat.svelte（Svelte 5 runes，直连 Coze v3 SSE + 后端 Dify 代理）
+ * 依赖: Coze Web SDK (https://lf-cdn.coze.cn/obj/unpkg/flow-platform/chat-app-sdk/)
  */
-import AgentChat from "@components/widget/AgentChat.svelte";
-
-const BOT_ID = "7664222715091370036";
-const API_BASE = "/api/coze"; // coze-gateway 后端（token 签发 + Dify 代理）
-const COZE_API_BASE = "https://api.coze.cn"; // 浏览器直连 Coze Chat API v3
 ---
 
-<!-- ===== 自建悬浮球 + 问候气泡（逻辑由 AgentChat.svelte 绑定） ===== -->
+<!-- ===== 自建悬浮球 + 问候气泡（SDK 悬浮球已隐藏：ui.asstBtn.isNeed = false） ===== -->
 <div id="coze-widget" class="coze-widget">
   <!-- 问候气泡：位于悬浮球上方，带指向球的尾巴 -->
   <div id="coze-bubble" class="coze-bubble" role="status">
@@ -96,7 +99,7 @@ const COZE_API_BASE = "https://api.coze.cn"; // 浏览器直连 Coze Chat API v3
   /* 气泡显示期间，球弹出到完整位（09 模板形态：尾巴对准球顶） */
   .coze-widget.coze-has-bubble .coze-ball { transform: translateY(-16px); }
 
-  /* 聊天窗打开 → 整组隐藏（AgentChat.svelte 切换 coze-chat-open） */
+  /* 聊天窗打开 → 整组隐藏（onShow/onHide 切换） */
   .coze-widget.coze-chat-open {
     visibility: hidden;
     opacity: 0;
@@ -215,5 +218,308 @@ const COZE_API_BASE = "https://api.coze.cn"; // 浏览器直连 Coze Chat API v3
   }
 </style>
 
-<!-- ===== 自建聊天窗控制器（client:load 挂载；跨页存活于 #swup-container 外） ===== -->
-<AgentChat client:load botId={BOT_ID} apiBase={API_BASE} cozeApiBase={COZE_API_BASE} />
+<script is:inline data-swup-ignore-script>
+  (function () {
+    // ===== 配置 =====
+    var BOT_ID = "7664222715091370036";
+    var API_BASE = "/api/coze";
+    var SDK_URL = "https://lf-cdn.coze.cn/obj/unpkg/flow-platform/chat-app-sdk/1.2.0-beta.19/libs/cn/index.js";
+
+    // ===== 自建浮窗状态 =====
+    var cozeClient = null;       // WebChatClient 实例（构造成功后赋值）
+    var cozeSdkFailed = false;   // SDK 加载失败标记
+    var cozeInitFailed = false;  // 初始化失败标记（token/会话）
+    var GREETING_KEY = "coze_greeting_off"; // 用户点「不再显示」后置位；未置位则每次打开都弹（须在 clearCozeSessionCache 白名单中）
+
+    // ===== 访客 ID（跨会话关联，持久化到 localStorage） =====
+    var visitorId = localStorage.getItem("coze_visitor_id");
+    if (!visitorId) {
+      visitorId = "v_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+      localStorage.setItem("coze_visitor_id", visitorId);
+    }
+
+    // ===== 清除 Coze SDK 缓存的会话状态（安全兜底） =====
+    // 防止后端 Plan B 未生效时 SDK 用新 token 访问旧 conversation 导致 4101
+    function clearCozeSessionCache() {
+      var keysToRemove = [];
+      for (var i = 0; i < localStorage.length; i++) {
+        var key = localStorage.key(i);
+        if (key && (key.startsWith("coze_") || key.startsWith("COZE_"))) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove = keysToRemove.filter(function (k) {
+        return k !== "coze_visitor_id" && k !== GREETING_KEY;
+      });
+      keysToRemove.forEach(function (k) { localStorage.removeItem(k); });
+    }
+    clearCozeSessionCache();
+
+    // ===== 问候气泡（每次打开都弹；× 仅本次关闭 / 3s 自动关；「不再显示」永久停用） =====
+    function closeGreeting() {
+      var bubble = document.getElementById("coze-bubble");
+      var w = document.getElementById("coze-widget");
+      if (bubble) bubble.classList.remove("coze-bubble-show");
+      if (w) w.classList.remove("coze-has-bubble");
+    }
+
+    function maybeShowGreeting() {
+      if (localStorage.getItem(GREETING_KEY)) return; // 已点「不再显示」→ 不再弹出
+      var bubble = document.getElementById("coze-bubble");
+      var w = document.getElementById("coze-widget");
+      if (!bubble || !w) return;
+      bubble.classList.add("coze-bubble-show");
+      w.classList.add("coze-has-bubble");
+
+      var timer = setTimeout(closeGreeting, 3000); // 3s 自动关闭（仅本次，下次仍弹）
+
+      var closeBtn = document.getElementById("coze-bubble-close");
+      if (closeBtn) {
+        closeBtn.addEventListener("click", function () {
+          clearTimeout(timer); // ×：仅本次关闭，下次仍弹
+          closeGreeting();
+        });
+      }
+      var neverBtn = document.getElementById("coze-bubble-never");
+      if (neverBtn) {
+        neverBtn.addEventListener("click", function () {
+          clearTimeout(timer);
+          localStorage.setItem(GREETING_KEY, "1"); // 「不再显示」：记住并永久停用
+          closeGreeting();
+        });
+      }
+    }
+
+    // ===== 聊天窗 onShow/onHide：切换自建浮窗整组显隐 =====
+    function onChatShow() {
+      closeGreeting(); // 开聊天窗时连气泡一起收掉
+      var w = document.getElementById("coze-widget");
+      if (w) w.classList.add("coze-chat-open");
+    }
+
+    function onChatHide() {
+      var w = document.getElementById("coze-widget");
+      if (w) w.classList.remove("coze-chat-open"); // 关聊天窗 → 悬浮球重新出现
+    }
+
+    // ===== 悬浮球点击 =====
+    function bindCozeWidget() {
+      // 点击判定绑在不移动的 hitbox 上（覆盖球+上方小区域），球是其子元素，点击会冒泡上来
+      var zone = document.getElementById("coze-hitbox") || document.getElementById("coze-ball");
+      if (!zone) return;
+      zone.addEventListener("click", function () {
+        if (cozeClient) {
+          onChatShow(); // 先隐藏球，避免与 SDK 容器同屏重叠
+          try {
+            cozeClient.showChatBot();
+          } catch (e) {
+            console.error("[Coze] showChatBot 失败:", e);
+            onChatHide();
+            showCozeToast("AI 助手暂时不可用", "error");
+          }
+        } else if (cozeSdkFailed || cozeInitFailed) {
+          showCozeToast("AI 助手暂时不可用，请稍后重试", "error");
+        } else {
+          showCozeToast("AI 助手加载中，请稍候…", "warning");
+        }
+      });
+    }
+
+    // ===== Token 获取/刷新 =====
+    function fetchToken(endpoint, userId) {
+      return fetch(API_BASE + endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: userId }),
+      }).then(function (res) {
+          if (res.status === 403) {
+            // Nginx 返回 HTML 403，后端返回 JSON 403，都要兼容
+            return res.text().then(function (body) {
+              var detail = body;
+              try { detail = JSON.parse(body); } catch (e) {}
+              window.dispatchEvent(new CustomEvent("coze-auth-blocked", { detail: detail }));
+              throw new Error("IP_FORBIDDEN");
+            });
+          }
+          if (res.status === 503) {
+            return res.text().then(function (body) {
+              var detail = body;
+              try { detail = JSON.parse(body); } catch (e) {}
+              window.dispatchEvent(new CustomEvent("coze-quota-exhausted", { detail: detail }));
+              throw new Error("QUOTA_EXHAUSTED");
+            });
+          }
+          return res.json().then(function (data) { return data.token; });
+        });
+    }
+
+    // ===== 动态加载 Coze SDK（异步，不阻塞页面） =====
+    function loadCozeSDK(callback) {
+      if (typeof CozeWebSDK !== "undefined" && CozeWebSDK.WebChatClient) {
+        callback();
+        return;
+      }
+      var script = document.createElement("script");
+      script.src = SDK_URL;
+      script.async = true;
+      script.onload = callback;
+      script.onerror = function () {
+        cozeSdkFailed = true;
+        console.warn("[Coze] SDK 加载失败，AI 助手不可用");
+      };
+      document.head.appendChild(script);
+    }
+
+    // ===== 错误提示 Toast =====
+    function showCozeToast(message, type) {
+      var existing = document.getElementById("coze-toast");
+      if (existing) existing.remove();
+
+      var toast = document.createElement("div");
+      toast.id = "coze-toast";
+      toast.style.cssText =
+        "position:fixed;bottom:90px;right:24px;z-index:9999;" +
+        "padding:12px 16px;border-radius:8px;font-size:14px;line-height:1.5;" +
+        "max-width:300px;box-shadow:0 4px 12px rgba(0,0,0,0.15);cursor:pointer;" +
+        "animation:cozeFadeIn 0.3s ease;transition:opacity 0.3s;" +
+        (type === "error"
+          ? "background:#fff0f0;color:#c00;border:1px solid #ffc0c0;"
+          : "background:#fffbe6;color:#b8860b;border:1px solid #ffe58f;");
+
+      var icon = type === "error" ? "✕" : "⚠";
+      toast.innerHTML = '<span style="margin-right:8px">' + icon + "</span>" +
+        '<span>' + message + '</span><span style="margin-left:8px;opacity:0.5">×</span>';
+
+      toast.addEventListener("click", function () { toast.remove(); });
+      document.body.appendChild(toast);
+
+      // 自动消失
+      setTimeout(function () {
+        if (toast.parentNode) {
+          toast.style.opacity = "0";
+          setTimeout(function () { toast.remove(); }, 300);
+        }
+      }, 10000);
+    }
+
+    // 注入 Toast 动画
+    if (!document.getElementById("coze-toast-style")) {
+      var style = document.createElement("style");
+      style.id = "coze-toast-style";
+      style.textContent =
+        "@keyframes cozeFadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}";
+      document.head.appendChild(style);
+    }
+
+    // ===== 事件监听 =====
+    window.addEventListener("coze-auth-blocked", function () {
+      showCozeToast("AI 助手暂时不可用（网络限制）", "error");
+    });
+    window.addEventListener("coze-quota-exhausted", function () {
+      showCozeToast("AI 助手额度已用尽，请联系管理员", "warning");
+    });
+
+    // ===== Swup SPA 导航后重置浮窗状态 =====
+    // 浮窗/SDK 容器都在 #swup-container 之外，跨页存活；若聊天窗开着时切页，
+    // coze-chat-open 会残留 → 悬浮球永久消失。content:replace 后强制收起聊天窗。
+    // 注意：这里不能给 body 设置 theme-mode 属性（曾用于跟随博客亮/暗），那会污染
+    // 全站样式（SDK Semi 暗色变量继承到 body），切页后页面样式会错乱——已回退，
+    // 聊天窗固定用 SDK 默认主题。
+    function resetCozeOnNavigate() {
+      var w = document.getElementById("coze-widget");
+      if (w && w.classList.contains("coze-chat-open")) {
+        w.classList.remove("coze-chat-open");
+        if (cozeClient) {
+          try {
+            cozeClient.hideChatBot();
+          } catch (e) {
+            console.error("[Coze] hideChatBot 失败:", e);
+          }
+        }
+      }
+    }
+    // 注册 swup hook（swup 可能比本脚本晚初始化，沿用 Twikoo/Navbar 的兜底模式）
+    if (window.swup && window.swup.hooks) {
+      window.swup.hooks.on("content:replace", resetCozeOnNavigate);
+    } else {
+      document.addEventListener("swup:enable", function () {
+        if (window.swup && window.swup.hooks) {
+          window.swup.hooks.on("content:replace", resetCozeOnNavigate);
+        }
+      });
+    }
+
+    // ===== 初始化后端会话（Plan B: Redis 会话映射） =====
+    // 返回 { sessionId }，或 null（兜底使用本地 visitorId）
+    function initSession() {
+      return fetch(API_BASE + "/session/init?visitorId=" + encodeURIComponent(visitorId), { method: "POST" })
+        .then(function (res) {
+          if (res.status === 403) {
+            return res.text().then(function () { return null; });
+          }
+          return res.json().then(function (data) { return data.sessionId || null; });
+        })
+        .catch(function () { return null; });
+    }
+
+    // ===== 初始化 Coze WebChat =====
+    function initCozeChat() {
+      // Step 1: 获取后端会话 ID（Plan B 隔离）
+      initSession().then(function (sessionId) {
+        var userId = sessionId || visitorId;  // Plan B 兜底: 用本地 visitorId
+
+        // Step 2: 加载 SDK + 获取 Token（传递 userId 实现 per-user 会话隔离）
+        loadCozeSDK(function () {
+          fetchToken("/token/init", userId)
+            .then(function (token) {
+              cozeClient = new CozeWebSDK.WebChatClient({
+                config: { bot_id: BOT_ID },
+                auth: {
+                  type: "token",
+                  token: token,
+                  onRefreshToken: function () {
+                    return fetchToken("/token/refresh", userId);
+                  },
+                },
+                userInfo: { id: userId, nickname: "Visitors" },
+                ui: {
+                  base: { lang: "zh-CN", zIndex: 1020 }, // 全中文 UI + 高于 FloatingControls(1000)/FloatingTOC(1001)
+                  asstBtn: { isNeed: false },             // 隐藏 SDK 悬浮球，改用自建球
+                  header: { isShow: true, isNeedClose: true, title: "AI 助手" },
+                  footer: { isShow: false },              // 去掉底部「扣子」链接
+                  chatBot: { title: "AI 助手", onShow: onChatShow, onHide: onChatHide },
+                },
+              });
+            })
+            .catch(function (err) {
+              cozeInitFailed = true;
+              if (err.message === "IP_FORBIDDEN") {
+                showCozeToast("AI 助手暂时不可用（网络限制）", "error");
+              } else if (err.message === "QUOTA_EXHAUSTED") {
+                showCozeToast("AI 助手额度已用尽，请联系管理员", "warning");
+              } else {
+                console.error("[Coze] 初始化失败:", err);
+              }
+            });
+        });
+      });
+    }
+
+    // ===== 绑定自建浮窗 + 首次访问问候（模板已渲染，立即执行，函数内有 null 保护） =====
+    bindCozeWidget();
+    maybeShowGreeting();
+
+    // 页面加载完成后初始化（不阻塞 DOM 渲染）
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", initCozeChat);
+    } else {
+      // 用 requestIdleCallback 或 setTimeout 延迟，确保不干扰首屏
+      // 注意：requestIdleCallback 第二参必须是 options 字典（{ timeout }），传数字会抛 TypeError
+      if (window.requestIdleCallback) {
+        window.requestIdleCallback(initCozeChat, { timeout: 500 });
+      } else {
+        setTimeout(initCozeChat, 500);
+      }
+    }
+  })();
+</script>
