@@ -30,11 +30,13 @@
     role: "user" | "assistant";
     content: string;
     ts: number;
+    quote?: string; // 追问引用：本条消息引用了哪条回复（「追问」携带，历史注入用）
   }
   interface AgentState {
     messages: ChatMessage[];
     conversationId?: string; // Dify 侧会话 id
     streaming: boolean;
+    followUps: string[]; // Coze 回复后追问建议（follow_up 事件，session-only 不持久化）
   }
   interface AuthState {
     token?: string;
@@ -54,15 +56,21 @@
   let panelOpen = $state(false);
   let activeAgent: AgentKey = $state("coze");
   let agents = $state<Record<AgentKey, AgentState>>({
-    coze: { messages: [], streaming: false },
-    dify: { messages: [], streaming: false },
+    coze: { messages: [], streaming: false, followUps: [] },
+    dify: { messages: [], streaming: false, followUps: [] },
   });
   let auth = $state<AuthState>({});
   let input = $state("");
   let cozeToken = $state<string | null>(null);
+  // 开场白（bot info 的 onboarding_info）：空会话时渲染为首条消息；session-only 不持久化
+  let cozePrologue = $state<string | null>(null);
+  let cozeSuggested = $state<string[]>([]);
+  let prologueFetched = false;
   let toast = $state<{ text: string; type: ToastType } | null>(null);
   let msgBox = $state<HTMLElement | null>(null);
   let textInput = $state<HTMLTextAreaElement | null>(null);
+  // 追问引用条（仅 Coze）：「追问」点击后挂在输入框上方，发送时随消息携带
+  let cozeQuote = $state<ChatMessage | null>(null);
 
   // 访客 ID（浏览器持久化；SSR 下为空，onMount 后赋值）
   let visitorId = "";
@@ -121,14 +129,24 @@
     }
   }
 
+  /** 修复持久化历史（自愈）：历史永远只含「问答成对」的完整轮次——
+      去掉空内容消息（空 user 无意义；空 assistant = 未完成占位），
+      再去掉尾部没收到回复的 user 轮次（刷新 / 流中断残留）。否则残留的
+      未完成轮次会让下一轮 history 出现 [.., user, user] / 尾 user，破坏交替 → 卡会话 */
+  function normalizeMessages(msgs: ChatMessage[]): ChatMessage[] {
+    const out = msgs.filter((m) => m.content.trim().length > 0);
+    while (out.length && out[out.length - 1].role === "user") out.pop();
+    return out;
+  }
+
   function loadPersisted() {
     try {
       const a = getLS(LS_AUTH);
       if (a) auth = { ...auth, ...JSON.parse(a) };
       const cm = getLS(lsMsg("coze"));
-      if (cm) agents.coze.messages = JSON.parse(cm);
+      if (cm) agents.coze.messages = normalizeMessages(JSON.parse(cm));
       const dm = getLS(lsMsg("dify"));
-      if (dm) agents.dify.messages = JSON.parse(dm);
+      if (dm) agents.dify.messages = normalizeMessages(JSON.parse(dm));
       const dv = getLS(LS_DIFY_CONV);
       if (dv) agents.dify.conversationId = dv;
       const act = getLS(LS_ACTIVE);
@@ -193,6 +211,7 @@
     panelOpen = true;
     closeGreeting();
     document.getElementById("coze-widget")?.classList.add("coze-chat-open");
+    void fetchBotInfo(); // 挂载时没拉到开场白（如 token 初始化失败）则开面板重试
     // 聚焦输入框（等待面板渲染完成）
     requestAnimationFrame(() => textInput?.focus());
   }
@@ -217,8 +236,8 @@
     activeAgent = k;
     saveActive();
     if (k === "dify" && !isAuthValid) {
-      // 锁定态切过来：停留展示锁屏，引导去对暗号
-      showToast("请先对暗号解锁 Dify 智库", "warning");
+      // 锁定态切过来：停留展示锁屏
+      showToast("dify 未解锁", "warning");
     }
   }
 
@@ -273,6 +292,30 @@
     return false;
   }
 
+  /** 拉取 Coze bot info 开场白（onboarding_info.prologue + suggested_questions），
+      空会话时渲染为首条消息。失败静默——没有开场白聊天窗也能正常用。 */
+  async function fetchBotInfo() {
+    if (prologueFetched) return;
+    if (!(await ensureCozeToken())) return;
+    try {
+      const res = await fetch(`${cozeApiBase}/v3/bot/info?bot_id=${botId}`, {
+        headers: { Authorization: `Bearer ${cozeToken}` },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const onb = data?.data?.onboarding_info;
+      if (onb?.prologue) cozePrologue = onb.prologue;
+      if (Array.isArray(onb?.suggested_questions)) {
+        cozeSuggested = onb.suggested_questions
+          .filter((s): s is string => typeof s === "string")
+          .slice(0, 3);
+      }
+      prologueFetched = true;
+    } catch {
+      /* 网络失败静默，下次开面板重试 */
+    }
+  }
+
   // ==================== SSE 解析（通用） ====================
   async function readSSE(res: Response, onEvent: (event: string, data: string) => void) {
     const reader = res.body?.getReader();
@@ -307,13 +350,16 @@
   }
 
   // ==================== Coze 侧（直连 v3/chat，解析 tool_response） ====================
-  /** 追加/合并流式 answer：兼容「全量重发」与「增量追加」两种语义 */
+  /** 追加/合并流式 answer：兼容「全量重发」与「增量追加」两种语义。
+      修复卡会话根因：delta 已拼出全文后 conversation.message.completed 又发一遍完整 answer，
+      旧逻辑因长度相等（chunk.length > prev.length 为 false）走 prev+chunk 把整段重复拼接，
+      污染历史 → 下轮模型基于垃圾上下文作答。改为互为前缀取长。 */
   function mergeAnswer(prev: string, chunk: string): string {
     if (!chunk) return prev;
     if (!prev) return chunk;
-    // 全量模式：新 chunk 是已收文本的超集且以旧文本开头 → 整体替换
-    if (chunk.length > prev.length && chunk.startsWith(prev)) return chunk;
-    return prev + chunk; // 增量模式：直接拼接
+    if (chunk.startsWith(prev)) return chunk; // 全量/累积重发（含长度相等）→ 整体替换
+    if (prev.startsWith(chunk)) return prev; // 更短重发 / 迟到首段 → 保留已收
+    return prev + chunk; // 纯增量 → 直接拼接
   }
 
   function updateLastAssistant(k: AgentKey, content: string) {
@@ -335,31 +381,65 @@
         auth.token = data.token;
         auth.expiresAt = data.expiresAt;
         saveAuth();
-        if (changed) showToast("鉴权成功，Dify 智库已解锁", "success");
+        if (changed) showToast("鉴权成功，dify 已解锁", "success");
       }
     } catch {
       /* tool_response 非鉴权 JSON，忽略 */
     }
   }
 
-  async function sendCoze() {
+  /** 解析 follow_up 消息：content 为 JSON 数组字符串，取前 3 条追问建议 */
+  function parseFollowUp(content: string): string[] {
+    try {
+      const parsed = JSON.parse(content);
+      const arr = typeof parsed === "string" ? JSON.parse(parsed) : parsed;
+      if (Array.isArray(arr)) {
+        return arr.filter((s): s is string => typeof s === "string").slice(0, 3);
+      }
+    } catch {
+      /* 解析失败返回空 */
+    }
+    return [];
+  }
+
+  /** 构建 Coze 请求历史（auto_save_history:false → 无服务端记忆，每次全量下发）：
+      - 空内容过滤 + -40 条截断；追问引用注入 content 前部（引文截断 200 字防撑爆上下文）
+      - 「删除单条回复」可能造成同角色相邻 → 合并保交替（Coze 要求 user/assistant 交替、末条 user） */
+  function buildCozeHistory() {
+    const rows: { role: "user" | "assistant"; content: string }[] = [];
+    for (const m of agents.coze.messages.filter((m) => m.content).slice(-40)) {
+      const content = m.quote
+        ? `引用上文：「${m.quote.slice(0, 200)}」\n\n${m.content}`
+        : m.content;
+      const last = rows[rows.length - 1];
+      if (last && last.role === m.role) last.content += `\n\n${content}`;
+      else rows.push({ role: m.role, content });
+    }
+    return rows;
+  }
+
+  async function sendCoze(prefill?: string) {
     if (agents.coze.streaming) return;
-    const text = input.trim();
+    const text = (prefill ?? input).trim();
     if (!text) return;
-    input = "";
-    agents.coze.messages.push({ role: "user", content: text, ts: Date.now() });
+    // 点建议 chip 走 prefill：不打扰输入框草稿；手动发送才清空输入框
+    if (prefill === undefined) input = "";
+    agents.coze.followUps = []; // 新对话轮次，清掉上一轮追问建议
+    // 追问引用：输入框上方挂着引用条时，随本条用户消息携带（buildCozeHistory 注入 content）
+    const quote = cozeQuote ? cozeQuote.content : undefined;
+    agents.coze.messages.push({ role: "user", content: text, ts: Date.now(), quote });
+    cozeQuote = null; // 引用条只服务当前这一问
     agents.coze.streaming = true;
     agents.coze.messages.push({ role: "assistant", content: "", ts: Date.now() });
 
+    let streamOk = false; // 流是否完整读完：中断/abort → false，部分回复也整体撤掉
+    let streamFailed = false; // 是否已 toast 过错误（回滚时避免重复提示）
     try {
       if (!(await ensureCozeToken())) return;
 
       // 携带完整历史（auto_save_history:false → 无服务端记忆，每次全量下发）
-      // 上限 40 条（约 20 轮）：避免无界增长撑爆模型上下文
-      const history = agents.coze.messages
-        .filter((m) => m.content)
-        .slice(-40)
-        .map((m) => ({ role: m.role, content: m.content }));
+      // 上限 40 条（约 20 轮）+ 同角色合并：buildCozeHistory 统一处理
+      const history = buildCozeHistory();
 
       const body = {
         bot_id: botId,
@@ -392,10 +472,13 @@
 
       if (!res.ok) {
         const detail = await safeJson(res);
-        if (res.status === 429) showToast("发送太频繁，请稍后再试", "warning");
-        else if (res.status === 500 || res.status >= 502) {
+        if (res.status === 429) {
+          showToast("发送太频繁，请稍后再试", "warning");
+          streamFailed = true;
+        } else if (res.status === 500 || res.status >= 502) {
           showToast("AI 助手暂时无法回复，请稍后重试", "error");
           console.error("[AgentChat] Coze chat 失败:", res.status, detail);
+          streamFailed = true;
         }
         return;
       }
@@ -415,19 +498,38 @@
               updateLastAssistant("coze", assistantText);
             } else if (msg.type === "tool_response" && msg.content) {
               handleToolResponse(msg.content);
+            } else if (msg.type === "follow_up" && msg.content) {
+              // 回复后的追问建议：content 是 JSON 数组字符串，渲染为可点 chips
+              agents.coze.followUps = parseFollowUp(msg.content);
             }
           } catch {
             /* 事件解析失败忽略 */
           }
         } else if (event === "conversation.chat.failed") {
           showToast("AI 助手回复失败，请稍后重试", "error");
+          streamFailed = true;
         }
       });
+      streamOk = true; // 流完整读完（若走 failed 事件 → assistantText 仍空，由 finally 内容检查兜底）
     } catch (err) {
       console.error("[AgentChat] Coze 流中断:", err);
       showToast("网络连接中断，请稍后重试", "error");
+      streamFailed = true;
     } finally {
       agents.coze.streaming = false;
+      // 未完成轮次整体撤掉：流中断（含刷新时 abort）/ 请求失败 / 回复为空 →
+      // 本轮 user + 空 assistant 一并回滚，文本还给输入框（点发送即重试）。
+      // 绝不把未完成轮次写进历史（否则历史尾 user → 下轮破坏交替 → 卡会话）
+      const msgs = agents.coze.messages;
+      const last = msgs[msgs.length - 1];
+      const prev = msgs[msgs.length - 2];
+      const incomplete = !streamOk || (last?.role === "assistant" && !last.content);
+      if (incomplete && last?.role === "assistant" && prev?.role === "user") {
+        agents.coze.messages = msgs.slice(0, -2);
+        if (prefill === undefined) input = prev.content;
+        // 空回复/静默失败：前面没 toast 过错误才提示，否则只回滚不打扰
+        if (!streamFailed) showToast("AI 助手没有回复，请重试", "warning");
+      }
       saveMessages("coze");
     }
   }
@@ -436,7 +538,7 @@
   async function sendDify() {
     if (agents.dify.streaming) return;
     if (!isAuthValid) {
-      showToast("请先对暗号解锁 Dify 智库", "warning");
+      showToast("dify 未解锁", "warning");
       return;
     }
     const text = input.trim();
@@ -446,6 +548,8 @@
     agents.dify.streaming = true;
     agents.dify.messages.push({ role: "assistant", content: "", ts: Date.now() });
 
+    let streamOk = false; // 流是否完整读完：中断/abort → false，部分回复也整体撤掉
+    let streamFailed = false; // 是否已 toast 过错误（回滚时避免重复提示）
     try {
       const res = await fetch(`${apiBase}/dify/chat`, {
         method: "POST",
@@ -463,15 +567,19 @@
         // 每日 JWT 无效/过期 → 清空凭据，重新锁定
         auth = {};
         saveAuth();
-        showToast("每日通行证已过期，请重新对暗号", "warning");
+        showToast("dify 通行证已过期", "warning");
+        streamFailed = true;
         return;
       }
       if (!res.ok) {
         const detail = await safeJson(res);
-        if (res.status === 429) showToast("发送太频繁，请稍后再试", "warning");
-        else {
-          showToast("Dify 智库暂时无法回复，请稍后重试", "error");
+        if (res.status === 429) {
+          showToast("发送太频繁，请稍后再试", "warning");
+          streamFailed = true;
+        } else {
+          showToast("dify 暂时无法回复，请稍后重试", "error");
           console.error("[AgentChat] Dify chat 失败:", res.status, detail);
+          streamFailed = true;
         }
         return;
       }
@@ -498,19 +606,80 @@
         } else if (event === "error") {
           try {
             const d = JSON.parse(data);
-            showToast(d.message || "Dify 智库出错了", "error");
+            showToast(d.message || "dify 出错了", "error");
           } catch {
-            showToast("Dify 智库出错了", "error");
+            showToast("dify 出错了", "error");
           }
+          streamFailed = true;
         }
       });
+      streamOk = true;
     } catch (err) {
       console.error("[AgentChat] Dify 流中断:", err);
       showToast("网络连接中断，请稍后重试", "error");
+      streamFailed = true;
     } finally {
       agents.dify.streaming = false;
+      // 与 Coze 同：未完成轮次撤掉（刷新/流中断/失败 → user + 空 assistant 回滚），文本还给输入框
+      const msgs = agents.dify.messages;
+      const last = msgs[msgs.length - 1];
+      const prev = msgs[msgs.length - 2];
+      const incomplete = !streamOk || (last?.role === "assistant" && !last.content);
+      if (incomplete && last?.role === "assistant" && prev?.role === "user") {
+        agents.dify.messages = msgs.slice(0, -2);
+        input = prev.content;
+        // 空回复/静默失败：前面没 toast 过错误才提示
+        if (!streamFailed) showToast("AI 助手没有回复，请重试", "warning");
+      }
       saveMessages("dify");
     }
+  }
+
+  // ==================== 新对话（清空当前 agent 会话，只清所在 tab） ====================
+  /** 点击直接初始化，无需二次确认 */
+  function onNewChatClick() {
+    if (agents[activeAgent].messages.length === 0) {
+      showToast("已经是新对话了", "warning");
+      return;
+    }
+    clearActiveConversation();
+  }
+  /** 只清 activeAgent 的会话：coze tab 点「新对话」绝不触碰 dify（反之亦然） */
+  function clearActiveConversation() {
+    const k = activeAgent;
+    agents[k].messages = [];
+    agents[k].followUps = [];
+    if (k === "dify") {
+      agents.dify.conversationId = undefined; // Dify 会话在服务端，一并重置
+      saveDifyConv();
+    }
+    cozeQuote = null;
+    saveMessages(k);
+    showToast("已开启新对话", "success");
+  }
+
+  // ==================== 单条消息操作（仅 Coze agent，hover 显示） ====================
+  async function copyMessage(msg: ChatMessage) {
+    try {
+      await navigator.clipboard.writeText(msg.content);
+      showToast("已复制", "success");
+    } catch {
+      showToast("复制失败，请手动选择文本", "error");
+    }
+  }
+  /** 追问：引用该条回复 → 引用条挂输入框上方 + 聚焦输入框，等用户继续问（对齐 SDK isNeedQuote） */
+  function quoteMessage(msg: ChatMessage) {
+    cozeQuote = { ...msg };
+    requestAnimationFrame(() => {
+      textInput?.focus();
+      textInput?.scrollIntoView({ block: "nearest" });
+    });
+  }
+  function deleteMessage(msg: ChatMessage) {
+    agents.coze.messages = agents.coze.messages.filter((m) => m !== msg);
+    if (cozeQuote?.ts === msg.ts) cozeQuote = null; // 删的是正引用的那条 → 引用条一并撤下
+    saveMessages("coze");
+    showToast("已删除该条回复", "success");
   }
 
   // ==================== 发送入口 ====================
@@ -548,6 +717,7 @@
     loadPersisted();
     bindBall();
     maybeShowGreeting();
+    void fetchBotInfo(); // 预取开场白（空会话首条消息）
 
     // Swup 切页后强制收起聊天窗（浮窗跨页存活，coze-chat-open 会残留）
     const handleNavigate = () => closePanel();
@@ -580,6 +750,7 @@
     const msgs = agents[activeAgent].messages;
     const last = msgs[msgs.length - 1];
     void last?.content; // 订阅流式内容
+    void agents.coze.followUps; // 追问建议 chips 出现时也滚到底
     requestAnimationFrame(() => {
       if (msgBox) msgBox.scrollTop = msgBox.scrollHeight;
     });
@@ -616,14 +787,22 @@
         aria-selected={activeAgent === "dify"}
         onclick={() => switchAgent("dify")}
       >
-        <span class="tab-dot dify"></span>Dify 智库
+        <span class="tab-dot dify"></span>dify
         {#if !isAuthValid}
-          <span class="tab-lock" title="需先对暗号解锁">🔒</span>
+          <span class="tab-lock" title="未解锁">🔒</span>
         {:else}
           <span class="tab-unlock" title="已解锁">✓</span>
         {/if}
       </button>
     </div>
+    <button
+      type="button"
+      class="agent-newchat"
+      disabled={agents[activeAgent].streaming}
+      onclick={onNewChatClick}
+    >
+      新对话
+    </button>
     <button
       type="button"
       class="agent-close"
@@ -640,36 +819,99 @@
       <!-- 大闸门锁屏 -->
       <div class="dify-lock">
         <div class="lock-icon">🔒</div>
-        <p class="lock-title">Dify 智库已锁定</p>
-        <p class="lock-hint">在「博客助手」里输入 <code>/对暗号 xxxx</code> 换取每日通行证</p>
+        <p class="lock-title">dify 已锁定</p>
         <button type="button" class="lock-btn" onclick={() => switchAgent("coze")}>
-          去对暗号 →
+          返回博客助手
         </button>
       </div>
     {:else}
       <div class="agent-messages" bind:this={msgBox}>
+        {#if activeAgent === "coze" && agents.coze.messages.length === 0 && cozePrologue}
+          <!-- 空会话开场白：渲染为首条 assistant 消息（不进 messages 数组，不参与历史） -->
+          <div class="msg assistant">
+            <div class="bubble">{cozePrologue}</div>
+          </div>
+          {#if cozeSuggested.length}
+            <div class="suggestions">
+              {#each cozeSuggested as q, i (q + i)}
+                <button
+                  type="button"
+                  class="suggest-chip"
+                  disabled={agents.coze.streaming}
+                  onclick={() => void sendCoze(q)}
+                >
+                  {q}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        {/if}
         {#each agents[activeAgent].messages as msg, i (msg.ts + "-" + i)}
           <div class="msg {msg.role}">
             {#if msg.content}
-              <div class="bubble">{msg.content}</div>
+              <div class="bubble">
+                {#if msg.quote}
+                  <!-- 追问消息的引用块：引用的是哪条回复 -->
+                  <div class="bubble-quote">引用：「{msg.quote}」</div>
+                {/if}
+                {msg.content}
+              </div>
             {:else if agents[activeAgent].streaming}
               <div class="bubble typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
             {/if}
+            {#if activeAgent === "coze" && msg.role === "assistant" && msg.content}
+              <!-- 单条操作（仅 Coze，hover 显示）：复制 / 追问 / 删除 -->
+              <div class="msg-actions">
+                <button type="button" class="msg-act" onclick={() => void copyMessage(msg)}>复制</button>
+                <button type="button" class="msg-act" onclick={() => quoteMessage(msg)}>追问</button>
+                <button type="button" class="msg-act danger" onclick={() => deleteMessage(msg)}>删除</button>
+              </div>
+            {/if}
           </div>
         {/each}
+        {#if activeAgent === "coze" && agents.coze.followUps.length}
+          <!-- 回复后的追问建议（follow_up 事件）：渲染为可点 chips -->
+          <div class="suggestions">
+            {#each agents.coze.followUps as q, i (q + i)}
+              <button
+                type="button"
+                class="suggest-chip"
+                disabled={agents.coze.streaming}
+                onclick={() => void sendCoze(q)}
+              >
+                {q}
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
 
   <!-- 输入区 -->
   {#if !(activeAgent === "dify" && !isAuthValid)}
+    {#if activeAgent === "coze" && cozeQuote}
+      <!-- 追问引用条：对齐 SDK isNeedQuote，发送时随消息携带 -->
+      <div class="quote-bar">
+        <span class="quote-label">追问</span>
+        <span class="quote-text">{cozeQuote.content}</span>
+        <button
+          type="button"
+          class="quote-clear"
+          aria-label="取消引用"
+          onclick={() => (cozeQuote = null)}
+        >
+          ×
+        </button>
+      </div>
+    {/if}
     <div class="agent-footer">
       <textarea
         bind:this={textInput}
         bind:value={input}
         rows="1"
         maxlength="2000"
-        placeholder={activeAgent === "coze" ? "输入消息，/对暗号 xxx 解锁 Dify…" : "输入消息…"}
+        placeholder="输入消息…"
         aria-label="消息输入框"
         oninput={autoResize}
         onkeydown={onInputKeydown}
@@ -810,6 +1052,28 @@
     background: var(--btn-regular-bg);
     color: var(--deep-text);
   }
+  .agent-newchat {
+    flex-shrink: 0;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--line-divider);
+    border-radius: var(--radius-lg);
+    background: none;
+    color: var(--content-meta);
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    transition:
+      background var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard);
+  }
+  .agent-newchat:hover:not(:disabled) {
+    background: var(--btn-regular-bg);
+    color: var(--deep-text);
+  }
+  .agent-newchat:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
 
   /* --- 主体 --- */
   .agent-body {
@@ -831,6 +1095,7 @@
   .msg {
     display: flex;
     max-width: 88%;
+    position: relative; /* 单条操作按钮的定位锚点 */
   }
   .msg.user {
     align-self: flex-end;
@@ -857,6 +1122,59 @@
     background: var(--btn-regular-bg);
     border: 1px solid var(--line-divider);
     border-bottom-left-radius: var(--radius-sm);
+  }
+  /* 气泡内引用块（追问消息） */
+  .bubble-quote {
+    margin-bottom: 0.4rem;
+    padding: 0.3rem 0.5rem;
+    border-left: 3px solid color-mix(in oklab, var(--primary) 50%, transparent);
+    border-radius: var(--radius-sm);
+    background: color-mix(in oklab, var(--primary) 7%, transparent);
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--content-meta);
+    max-height: 3.6em;
+    overflow: hidden;
+  }
+  /* 单条消息操作（仅 Coze assistant，hover 出现） */
+  .msg-actions {
+    position: absolute;
+    top: -0.5rem;
+    right: 0;
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--line-divider);
+    border-radius: var(--radius-lg);
+    background: var(--card-bg);
+    box-shadow: var(--shadow-button);
+    opacity: 0;
+    visibility: hidden;
+    z-index: 2;
+    transition: opacity var(--duration-fast) var(--ease-standard);
+  }
+  .msg:hover .msg-actions {
+    opacity: 1;
+    visibility: visible;
+  }
+  .msg-act {
+    border: none;
+    background: none;
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--content-meta);
+    cursor: pointer;
+    transition:
+      background var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard);
+  }
+  .msg-act:hover {
+    background: var(--btn-regular-bg);
+    color: var(--primary);
+  }
+  .msg-act.danger:hover {
+    color: #c00;
   }
   /* 流式打字动画 */
   .bubble.typing {
@@ -889,6 +1207,40 @@
     }
   }
 
+  /* --- 追问建议 chips（开场白预置问题 / 回复后 follow_up） --- */
+  .suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0 0.25rem;
+    max-width: 88%;
+    align-self: flex-start;
+  }
+  .suggest-chip {
+    padding: 0.4rem 0.75rem;
+    border: 1px solid var(--line-divider);
+    border-radius: var(--radius-full);
+    background: var(--btn-regular-bg);
+    color: var(--deep-text);
+    font-size: 12.5px;
+    line-height: 1.45;
+    text-align: left;
+    cursor: pointer;
+    transition:
+      border-color var(--duration-fast) var(--ease-standard),
+      background var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard);
+  }
+  .suggest-chip:hover:not(:disabled) {
+    border-color: color-mix(in oklab, var(--primary) 50%, transparent);
+    color: var(--primary);
+    background: color-mix(in oklab, var(--primary) 8%, transparent);
+  }
+  .suggest-chip:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
   /* --- 大闸门锁屏 --- */
   .dify-lock {
     flex: 1;
@@ -909,20 +1261,6 @@
     font-size: 15px;
     font-weight: 600;
     color: var(--deep-text);
-  }
-  .lock-hint {
-    margin: 0;
-    font-size: 13px;
-    color: var(--content-meta);
-    max-width: 240px;
-    line-height: 1.6;
-  }
-  .lock-hint code {
-    padding: 1px 5px;
-    border-radius: var(--radius-sm);
-    background: var(--inline-code-bg);
-    color: var(--inline-code-color);
-    font-size: 12px;
   }
   .lock-btn {
     margin-top: 0.4rem;
@@ -993,6 +1331,52 @@
     cursor: not-allowed;
   }
 
+  /* --- 追问引用条（输入框上方） --- */
+  .quote-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    border-top: 1px solid var(--line-divider);
+    background: color-mix(in oklab, var(--primary) 6%, var(--card-bg));
+    flex-shrink: 0;
+  }
+  .quote-label {
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--primary);
+  }
+  .quote-text {
+    flex: 1;
+    min-width: 0;
+    font-size: 12.5px;
+    line-height: 1.4;
+    color: var(--content-meta);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .quote-clear {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: var(--radius-full);
+    background: none;
+    color: var(--content-meta);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    transition:
+      background var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard);
+  }
+  .quote-clear:hover {
+    background: var(--btn-regular-bg);
+    color: var(--deep-text);
+  }
+
   /* --- Toast --- */
   .agent-toast {
     position: fixed;
@@ -1040,6 +1424,30 @@
     background: oklch(0.32 0.08 150);
     color: oklch(0.88 0.1 150);
     border-color: oklch(0.45 0.1 150);
+  }
+
+  /* --- 暗色主题文字可读性 ---
+     --deep-text 无暗色重定义（暗色下仍是近黑 oklch(0.25…)），
+     消息气泡 / 输入框 / 锁屏标题直接拿它当文字色 → 黑底黑字看不清。
+     统一换成 --btn-content（暗色下为浅色调文字）。 */
+  html.dark .msg.assistant .bubble,
+  html.dark .agent-footer textarea,
+  html.dark .dify-lock .lock-title,
+  html.dark .agent-tab:hover,
+  html.dark .agent-close:hover,
+  html.dark .suggest-chip,
+  html.dark .msg-actions .msg-act,
+  html.dark .quote-text,
+  html.dark .quote-clear,
+  html.dark .bubble-quote,
+  html.dark .agent-newchat {
+    color: var(--btn-content);
+  }
+  html.dark .msg-act.danger:hover {
+    color: oklch(0.7 0.18 20);
+  }
+  html.dark .agent-footer textarea::placeholder {
+    color: rgba(255, 255, 255, 0.35);
   }
   @keyframes agentToastIn {
     from {
