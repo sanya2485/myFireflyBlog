@@ -177,6 +177,23 @@ server {
     }
 
     # ============================================
+    # 每日暗号鉴权 API
+    #
+    # /api/auth/verify（暗号校验 → 签发每日 JWT）与 /api/auth/code（查暗号）
+    # 代理到 coze-gateway。鉴权靠后端 X-Auth-Secret 头校验
+    # （Coze 工作流 HTTP 节点携带），浏览器无该头 → 403，不可直达。
+    # ============================================
+    location /api/auth/ {
+        proxy_pass http://coze-gateway:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
+    }
+
+    # ============================================
     # 私有 PyPI（pypi-server）
     #
     # 博客容器与 pypi-server 通过 coze-net 共享 Docker 网络互联，
