@@ -8,7 +8,8 @@
  * - 检测 403（IP 白名单拦截）和 503（额度耗尽）并降级提示
  * - 访客隔离（基于 localStorage 维持 visitor ID）
  * - 定时 token 刷新由后端 TokenRefreshService 完成，前端 onRefreshToken 仅取最新 token
- * - 自建悬浮球：右下角半隐藏，悬停跳出动画；点击打开聊天窗（SDK 默认悬浮球已隐藏）
+ * - 自建悬浮球：右下角半隐藏，悬停跳出动画；点击直接打开聊天窗（SDK 默认悬浮球已隐藏）；
+ *   初始化未就绪时点击即启动初始化、就绪后自动打开，不显示「加载中」等待提示
  * - 问候气泡「hi~请问有什么问题吗？」：每次打开都弹；× 仅本次关闭 / 3s 自动关；点「不再显示」永久停用（localStorage 记住）
  * - 聊天窗中文 UI（ui.base.lang = zh-CN），覆盖硬编码英文标题，隐藏底部「扣子」链接
  * - 聊天窗固定用 SDK 默认亮色主题（曾实现跟随博客亮/暗：给 body 设 theme-mode 属性，会污染全站样式，已回退）
@@ -229,6 +230,8 @@
     var cozeClient = null;       // WebChatClient 实例（构造成功后赋值）
     var cozeSdkFailed = false;   // SDK 加载失败标记
     var cozeInitFailed = false;  // 初始化失败标记（token/会话）
+    var cozeInitializing = false; // 初始化进行中（防止重复构造）
+    var cozePendingShow = false;  // 点击后等待就绪 → 自动打开聊天窗
     var GREETING_KEY = "coze_greeting_off"; // 用户点「不再显示」后置位；未置位则每次打开都弹（须在 clearCozeSessionCache 白名单中）
 
     // ===== 访客 ID（跨会话关联，持久化到 localStorage） =====
@@ -320,7 +323,9 @@
         } else if (cozeSdkFailed || cozeInitFailed) {
           showCozeToast("AI 助手暂时不可用，请稍后重试", "error");
         } else {
-          showCozeToast("AI 助手加载中，请稍候…", "warning");
+          // 未就绪：不显示「加载中」等待提示，立即启动初始化；就绪后自动打开聊天窗
+          cozePendingShow = true;
+          if (!cozeInitializing) initCozeChat();
         }
       });
     }
@@ -364,8 +369,12 @@
       script.async = true;
       script.onload = callback;
       script.onerror = function () {
+        var wasPending = cozePendingShow;
         cozeSdkFailed = true;
+        cozeInitializing = false;
+        cozePendingShow = false;
         console.warn("[Coze] SDK 加载失败，AI 助手不可用");
+        if (wasPending) showCozeToast("AI 助手暂时不可用，请稍后重试", "error");
       };
       document.head.appendChild(script);
     }
@@ -464,6 +473,9 @@
 
     // ===== 初始化 Coze WebChat =====
     function initCozeChat() {
+      if (cozeClient || cozeSdkFailed || cozeInitFailed || cozeInitializing) return;
+      cozeInitializing = true;
+
       // Step 1: 获取后端会话 ID（Plan B 隔离）
       initSession().then(function (sessionId) {
         var userId = sessionId || visitorId;  // Plan B 兜底: 用本地 visitorId
@@ -490,8 +502,23 @@
                   chatBot: { title: "AI 助手", onShow: onChatShow, onHide: onChatHide },
                 },
               });
+              cozeInitializing = false;
+              // 点击触发的初始化：就绪后自动打开聊天窗（不再提示「加载中」）
+              if (cozePendingShow) {
+                cozePendingShow = false;
+                onChatShow();
+                try {
+                  cozeClient.showChatBot();
+                } catch (e) {
+                  console.error("[Coze] showChatBot 失败:", e);
+                  onChatHide();
+                  showCozeToast("AI 助手暂时不可用", "error");
+                }
+              }
             })
             .catch(function (err) {
+              cozeInitializing = false;
+              cozePendingShow = false;
               cozeInitFailed = true;
               if (err.message === "IP_FORBIDDEN") {
                 showCozeToast("AI 助手暂时不可用（网络限制）", "error");
