@@ -1512,8 +1512,7 @@ $effect(() => {
     border-radius: var(--radius-sm);
     /* 引用块：文字颜色与用户对话共用同一套随主题翻转的 --content-meta
       （亮色=黑、暗色=白），不再强制纯白——否则亮色下引用行也是白字，与需求不符。
-       背景用很淡的文字色灰底，仅用于与正文区分（用户要求若分不清可加灰）。 */
-    background: color-mix(in oklab, var(--content-meta) 9%, transparent);
+       背景留空=透明，跟随宿主气泡底色，与用户会话背景一致（不加灰）。 */
     font-size: 12px;
     line-height: 1.4;
     color: var(--content-meta);
