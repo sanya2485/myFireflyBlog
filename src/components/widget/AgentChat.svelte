@@ -813,6 +813,13 @@ function hideSelBtn() {
 	selReply = null;
 }
 
+/** 选中文本后再次按下拖拽：浏览器默认把已选文本当「元素」拖走（拖拽幽灵图），
+ *  而不是重新触发选区。禁掉气泡内的 dragstart → 二次拖拽变成重新进行选中。 */
+function bubbleDragStart(e: DragEvent) {
+	const t = e.target as Element | null;
+	if (t?.closest?.(".bubble")) e.preventDefault();
+}
+
 function updateSelReply() {
 	const sel = document.getSelection();
 	if (
@@ -956,6 +963,7 @@ onMount(() => {
 	document.addEventListener("selectionchange", updateSelReply);
 	document.addEventListener("mouseup", updateSelReply); // 拖选结束兜底重算
 	document.addEventListener("scroll", updateSelReply, true);
+	document.addEventListener("dragstart", bubbleDragStart); // 禁气泡内文本「元素拖拽」，允许重新选中
 
 	return () => {
 		clearTimeout(toastTimer);
@@ -963,6 +971,7 @@ onMount(() => {
 		document.removeEventListener("selectionchange", updateSelReply);
 		document.removeEventListener("mouseup", updateSelReply);
 		document.removeEventListener("scroll", updateSelReply, true);
+		document.removeEventListener("dragstart", bubbleDragStart);
 		// 卸载时移除挂到 body 的浮出按钮，避免跨页面残留
 		if (selBtn) {
 			selBtn.remove();
