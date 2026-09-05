@@ -783,11 +783,6 @@ function deleteMessage(_msg: ChatMessage) {
  * 用 focus 端 caret 矩形定位，图标水平居中停在该字下方。
  */
 function updateSelReply() {
-	// 选区追问只对 Coze 生效（dify 会话在服务端，本地追问不同步上下文）
-	if (activeAgent !== "coze") {
-		selReply = null;
-		return;
-	}
 	const sel = document.getSelection();
 	if (
 		!sel ||
@@ -815,10 +810,10 @@ function updateSelReply() {
 		selReply = null;
 		return;
 	}
-	// 必须落在同一条 assistant 消息的同一气泡内（不能跨消息/跨气泡选中）
+	// 必须落在同一条消息的同一气泡内（不能跨消息/跨气泡选中；user/assistant 均可）
 	const ba = aEl.closest(".bubble");
 	const bf = fEl.closest(".bubble");
-	if (!ba || ba !== bf || !ba.closest(".msg.assistant")) {
+	if (!ba || ba !== bf || !ba.closest(".msg")) {
 		selReply = null;
 		return;
 	}
@@ -866,6 +861,9 @@ function handleSelReply() {
 	if (!text) return;
 	if (activeAgent === "coze") {
 		cozeQuote = { role: "assistant", content: text.trim(), ts: Date.now() };
+	} else {
+		// dify：无本地引用机制，把选中文本填入输入框作为追问起点，用户补充后再发
+		input = text.trim();
 	}
 	sel?.removeAllRanges();
 	requestAnimationFrame(() => {
@@ -933,12 +931,14 @@ onMount(() => {
 	// 选区追问：selectionchange 驱动浮出按钮实时跟随；监听滚动（捕获）
 	// 让滚屏时按钮随选区重算，选区收合/消失则自动隐藏
 	document.addEventListener("selectionchange", updateSelReply);
+	document.addEventListener("mouseup", updateSelReply); // 拖选结束兜底重算
 	document.addEventListener("scroll", updateSelReply, true);
 
 	return () => {
 		clearTimeout(toastTimer);
 		clearInterval(nowTick);
 		document.removeEventListener("selectionchange", updateSelReply);
+		document.removeEventListener("mouseup", updateSelReply);
 		document.removeEventListener("scroll", updateSelReply, true);
 	};
 });
@@ -1533,7 +1533,7 @@ $effect(() => {
   /* --- 选中文本后浮出的「追问」按钮（absolute 锚到 .agent-messages） --- */
   .sel-reply {
     position: absolute;
-    z-index: 5;
+    z-index: 999; /* 确保浮出按钮绘制在任何消息/气泡/操作行之上，不被遮挡 */
     width: 30px;
     height: 30px;
     display: inline-flex;
