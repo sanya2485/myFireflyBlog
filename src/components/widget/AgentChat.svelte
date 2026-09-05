@@ -847,9 +847,12 @@ function updateSelReply() {
 				? rect.right
 				: rect.left
 			: rect.left + rect.width / 2;
+	// 按钮 absolute 锚定到 msgBox（containing block），坐标相对其 padding box；
+	// 滚动容器内的 absolute 子元素不随滚动移动 → 直接减 box.left/top 即可，
+	// 切勿再叠加 scrollTop/scrollLeft（否则列表滚过后图标被推到可视区下方/底部）。
 	selReply = {
-		x: ctr - box.left + boxEl.scrollLeft - 15, // 按钮 30px 宽，水平中心对准末端字号
-		y: rect.bottom - box.top + boxEl.scrollTop + 6, // 停在该字下方，6px 间隔
+		x: ctr - box.left - 15, // 按钮 30px 宽，水平中心对准末端字号
+		y: rect.bottom - box.top + 6, // 停在该字下方，6px 间隔
 		text: sel.toString(),
 	};
 }
