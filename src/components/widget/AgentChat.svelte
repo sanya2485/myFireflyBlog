@@ -74,6 +74,9 @@ let textInput = $state<HTMLTextAreaElement | null>(null);
 let kbUp = $state(false);
 // 追问引用条（仅 Coze）：「追问」点击后挂在输入框上方，发送时随消息携带
 let cozeQuote = $state<ChatMessage | null>(null);
+// 选中文本后浮出的「追问」小按钮（参照 Coze SDK 的选区追问交互）：
+// 鼠标/键盘选中单条 assistant 消息内部分文本 → 在最后选中字下方浮现；点击用该文本追问
+let selReply = $state<{ x: number; y: number; text: string } | null>(null);
 
 // 访客 ID（浏览器持久化；SSR 下为空，onMount 后赋值）
 let visitorId = "";
@@ -753,6 +756,105 @@ function deleteMessage(msg: ChatMessage) {
 	showToast("已删除该条回复", "success");
 }
 
+// ==================== 选中文本 → 浮出追问按钮（参照 Coze SDK 选区追问） ====================
+/**
+ * 依据 document selection 计算浮出按钮位置，仅在合法选区时设置 selReply。
+ * 合法选区：落在同一 bubble 内（单条 assistant 消息、可部分选中）、非空、且当前是 Coze agent。
+ * 定位到「最后选中那个字」下方：拖选方向决定末端是选区 end（从左往右）还是 start（从右往左），
+ * 用 focus 端 caret 矩形定位，图标水平居中停在该字下方。
+ */
+function updateSelReply() {
+	// 选区追问只对 Coze 生效（dify 会话在服务端，本地追问不同步上下文）
+	if (activeAgent !== "coze") {
+		selReply = null;
+		return;
+	}
+	const sel = document.getSelection();
+	if (
+		!sel ||
+		sel.isCollapsed ||
+		sel.rangeCount === 0 ||
+		sel.toString().trim() === ""
+	) {
+		selReply = null;
+		return;
+	}
+	const anchor = sel.anchorNode;
+	const focus = sel.focusNode;
+	if (!anchor || !focus) {
+		selReply = null;
+		return;
+	}
+	// 端点元素（文本节点取父元素）
+	const aEl = (
+		anchor.nodeType === Node.TEXT_NODE ? anchor.parentElement : anchor
+	) as Element | null;
+	const fEl = (
+		focus.nodeType === Node.TEXT_NODE ? focus.parentElement : focus
+	) as Element | null;
+	if (!aEl || !fEl) {
+		selReply = null;
+		return;
+	}
+	// 必须落在同一条 assistant 消息的同一气泡内（不能跨消息/跨气泡选中）
+	const ba = aEl.closest(".bubble");
+	const bf = fEl.closest(".bubble");
+	if (!ba || ba !== bf || !ba.closest(".msg.assistant")) {
+		selReply = null;
+		return;
+	}
+	const range = sel.getRangeAt(0);
+	// 拖拽方向：focus 是否在 anchor 之后（从左往右，末端=end）
+	let forward: boolean;
+	if (anchor === focus) forward = sel.anchorOffset < sel.focusOffset;
+	else
+		forward = !!(
+			anchor.compareDocumentPosition(focus) & Node.DOCUMENT_POSITION_FOLLOWING
+		);
+	// 折叠到 focus 端取 caret 矩形（collapsed range 通常给出 0 宽、行高的矩形）
+	const clip = range.cloneRange();
+	clip.collapse(forward); // true→end(从左往右)；false→start(从右往左)
+	let rect = clip.getBoundingClientRect();
+	// 兜底：个别浏览器 collapsed range 返回全 0 → 回退整选区矩形，取其末端
+	if (rect.width === 0 && rect.height === 0) {
+		rect = range.getBoundingClientRect();
+	}
+	// 面板带 transform（打开动画 translateY(0)，非 none）会让 fixed 后代相对面板定位，
+	// 故按钮用 absolute 锚到滚动容器 msgBox，坐标换算成容器内坐标（滚动时重算保对准）
+	const boxEl = msgBox;
+	if (!boxEl) {
+		selReply = null;
+		return;
+	}
+	const box = boxEl.getBoundingClientRect();
+	const ctr =
+		rect.width === 0
+			? forward
+				? rect.right
+				: rect.left
+			: rect.left + rect.width / 2;
+	selReply = {
+		x: ctr - box.left + boxEl.scrollLeft - 15, // 按钮 30px 宽，水平中心对准末端字号
+		y: rect.bottom - box.top + boxEl.scrollTop + 6, // 停在该字下方，6px 间隔
+		text: sel.toString(),
+	};
+}
+/** 点击浮出的追问按钮：以选中文本建追问引用条，聚焦输入框让用户基于该内容继续问 */
+function handleSelReply() {
+	const sel = document.getSelection();
+	const text = selReply?.text || sel?.toString()?.trim() || "";
+	selReply = null;
+	if (!text) return;
+	if (activeAgent === "coze") {
+		cozeQuote = { role: "assistant", content: text.trim(), ts: Date.now() };
+	}
+	sel?.removeAllRanges();
+	requestAnimationFrame(() => {
+		textInput?.focus();
+		textInput?.scrollIntoView({ block: "nearest" });
+	});
+}
+
 // ==================== 发送入口 ====================
 function send() {
 	if (activeAgent === "coze") void sendCoze();
@@ -809,9 +911,16 @@ onMount(() => {
 		now = Date.now();
 	}, 30_000);
 
+	// 选区追问：selectionchange 驱动浮出按钮实时跟随；监听滚动（捕获）
+	// 让滚屏时按钮随选区重算，选区收合/消失则自动隐藏
+	document.addEventListener("selectionchange", updateSelReply);
+	document.addEventListener("scroll", updateSelReply, true);
+
 	return () => {
 		clearTimeout(toastTimer);
 		clearInterval(nowTick);
+		document.removeEventListener("selectionchange", updateSelReply);
+		document.removeEventListener("scroll", updateSelReply, true);
 	};
 });
 
@@ -1072,6 +1181,21 @@ $effect(() => {
             {/each}
           </div>
         {/if}
+        {#if selReply}
+          <!-- 选中文本后浮出的「追问」按钮（absolute 锚定到本滚动容器）：
+               点 mousedown 时 preventDefault，避免按钮吃掉当前文本选区 -->
+          <button
+            type="button"
+            class="sel-reply"
+            data-tip="对选中内容追问"
+            aria-label="对选中内容追问"
+            style={`left: ${selReply.x}px; top: ${selReply.y}px;`}
+            onmousedown={(e) => e.preventDefault()}
+            onclick={() => handleSelReply()}
+          >
+            <Icon icon="material-symbols:reply-rounded" size="sm" />
+          </button>
+        {/if}
       </div>
     {/if}
   </div>
@@ -1294,6 +1418,7 @@ $effect(() => {
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
+    position: relative; /* 作为「选中文本追问」浮出按钮的 absolute 定位锚点 */
   }
   .msg {
     display: flex;
@@ -1372,15 +1497,29 @@ $effect(() => {
   .msg-act.danger:hover {
     color: #c00;
   }
-  /* msg-act 位于气泡下方：tooltip 改放到图标行下方，避免覆盖消息文本
-     （transform 沿用全局 tooltip 的上下滑入动画，此处仅翻转垂直方向） */
-  .msg-act::after {
-    bottom: auto;
-    top: calc(100% + 9px);
+  /* 复制/追问/删除的 tooltip 显示在图标上方（全局 [data-tip] 默认行为）：
+     用户确认不影响阅读，无需避让消息文本 */
+  /* --- 选中文本后浮出的「追问」按钮（absolute 锚到 .agent-messages） --- */
+  .sel-reply {
+    position: absolute;
+    z-index: 5;
+    width: 30px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-full);
+    background: var(--card-bg);
+    border: 1px solid var(--line-divider);
+    color: var(--primary);
+    box-shadow: var(--shadow-button);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard);
   }
-  .msg-act::before {
-    bottom: auto;
-    top: calc(100% + 4px);
+  .sel-reply:hover {
+    background: var(--btn-regular-bg);
+    color: var(--primary);
   }
   /* 流式打字动画 */
   .bubble.typing {
