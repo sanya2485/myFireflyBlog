@@ -1,14 +1,22 @@
 # ============================================
-# myFireflyBlog — GitHub Actions 自动部署到服务器
+# myFireflyBlog — GitHub Actions 双槽蓝绿部署
 # ============================================
 # 触发方式:
-#   1. Push 到 master 分支时自动触发
-#   2. 也可在 GitHub Actions 页面手动触发 (workflow_dispatch)
+#   1. Push 到 master 分支时自动触发 → 内容填进"非活动槽"并原子切流（auto）
+#   2. workflow_dispatch 手动触发:
+#        mode=stage-only 只填槽不切流（人工验证后 SSH release-activate.sh）
+#        slot=slot-a|b   覆盖自动选槽（用于定向重建某一槽；活动槽会被拒绝）
+#        source_ref      指定 git ref(tag/branch/sha) 重建填充 = 两槽皆坏时的兜底
 #
-# 前置条件 — 在 GitHub 仓库设置中添加以下 Secrets:
-#   - SERVER_HOST: 服务器 IP (替换为你的服务器 IP)
-#   - SERVER_USERNAME: SSH 用户名 (替换为你的 SSH 登录名)
-#   - SERVER_SSH_KEY: SSH 私钥内容（全量，含 -----BEGIN...-----）
+# 蓝绿语义（与 server/nginx/default.conf.template + server/release/* 配套）:
+#   * 内容永远先填"非活动槽"（服务器 release-slot-pick.sh 判定），绝不清当前活动槽
+#   * .deploy.json marker 在 SCP 内容落槽后才写（SCP rm:true 会清空槽内文件）
+#   * release-activate.sh 负责 flock 互斥 / nginx -t / 原子换链 / 自检失败自动回滚
+#   * 本 workflow 永不重建容器 / 不碰 nginx 配置（那归 deploy-nginx.yml）
+#   * 服务器上存在 /root/cc/blog/.kill-auto 时，即使 mode=auto 也只填不切（全人工模式）
+#
+# 前置条件 — GitHub Secrets:
+#   SERVER_HOST / SERVER_USERNAME / SERVER_SSH_KEY （无新增，自检走 https://127.0.0.1）
 # ============================================
 
 name: Deploy to Server
@@ -16,7 +24,31 @@ name: Deploy to Server
 on:
   push:
     branches: [ master ]
-  workflow_dispatch:       # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '部署模式'
+        type: choice
+        options:
+          - auto         # 填非活动槽 + 原子切流（默认）
+          - stage-only   # 只填槽不切流
+        default: auto
+      slot:
+        description: '目标槽（默认 auto=服务器自动挑非活动槽）'
+        type: choice
+        options:
+          - auto
+          - slot-a
+          - slot-b
+        default: auto
+      source_ref:
+        description: 'git ref 重建填充（默认空=当前检出的 ref；两槽皆坏时传 last-good-tag）'
+        type: string
+        default: ''
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false    # 并发部署排队执行，绝不互相打断（半切状态不可有）
 
 jobs:
   deploy:
@@ -24,6 +56,9 @@ jobs:
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
+        with:
+          # dispatch 给了 source_ref 就按它检出（tag/branch/sha），否则用默认（push=本次 sha / dispatch=默认分支）
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_ref || '' }}
 
       - name: 🟢 Setup Node.js
         uses: actions/setup-node@v4
@@ -41,18 +76,18 @@ jobs:
       - name: 🏗️ Build site
         run: pnpm build
 
-      - name: 📤 Deploy to server via SCP
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USERNAME }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          source: "dist/"
-          target: "/root/cc/myFireflyBlog"
-          strip_components: 1    # 去掉 dist/ 前缀，直接放内容
-          rm: true               # 删除服务器上旧文件
+      - name: 🧾 Build metadata
+        id: meta
+        run: |
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          f=$(find dist/_astro -maxdepth 1 -name '*.js' 2>/dev/null | head -1)
+          if [ -n "$f" ]; then
+            echo "probe=/_astro/$(basename "$f")" >> "$GITHUB_OUTPUT"
+          else
+            echo "probe=" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: 🔄 Reload nginx container
+      - name: 🖥️ Server prep（迁移门 + 建目录）
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -60,64 +95,104 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             set -e
-            echo "🚀 停止旧容器..."
-            docker stop myFireflyBlog 2>/dev/null || true
-            docker rm myFireflyBlog 2>/dev/null || true
-
-            # 确保共享网络存在
-            docker network inspect coze-net >/dev/null 2>&1 || docker network create coze-net
-
-            echo "🚀 启动新容器..."
-            CONFIG_MOUNT=""
-            SSL_MOUNT=""
-            if [ -f /root/cc/nginx/conf/default.conf ]; then
-              CONFIG_MOUNT="-v /root/cc/nginx/conf/default.conf:/etc/nginx/conf.d/default.conf:ro"
-              echo "  挂载自定义 nginx 配置"
-            else
-              echo "  ⚠️  未找到自定义 nginx 配置，使用默认配置"
-              echo "  请运行 Deploy Nginx Config workflow 启用自定义配置"
+            BASE=/root/cc/blog
+            mkdir -p "$BASE/bin" "$BASE/.stage" "$BASE/releases/slot-a" "$BASE/releases/slot-b"
+            if [ ! -L "$BASE/current" ]; then
+              echo "✗ 迁移门未过：$BASE/current 不是软链 —— 服务器还没做双槽一次性迁移"
+              echo "  先跑迁移脚本再推送，否则 CI 会在未迁移的布局上跑"
+              exit 1
             fi
-            if [ -d /root/cc/nginx/ssl ]; then
-              SSL_MOUNT="-v /root/cc/nginx/ssl:/etc/nginx/ssl:ro"
-              echo "  挂载 SSL 证书"
+            echo "✓ server layout ready (current -> $(readlink "$BASE/current"))"
+
+      - name: 📤 Upload release scripts → /root/cc/blog/bin
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: "server/release/"
+          target: "/root/cc/blog/bin"
+          strip_components: 2    # server/release/xxx.sh → bin/xxx.sh
+          rm: true               # 每次全量覆盖脚本（单目录，无并发风险）
+
+      - name: 📤 Upload dist → /root/cc/blog/.stage
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: "dist/"
+          target: "/root/cc/blog/.stage"
+          strip_components: 1    # dist/xxx → .stage/xxx
+          rm: true               # 清空上次临时内容；.stage 非活动，无停机影响
+
+      - name: 🟢 Fill slot + marker + activate
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          env:
+            COMMIT: ${{ steps.meta.outputs.commit }}
+            PROBE: ${{ steps.meta.outputs.probe }}
+            MODE: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || 'auto') || 'auto' }}
+            INPUT_SLOT: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.slot || 'auto') || 'auto' }}
+          script: |
+            set -euo pipefail
+            BASE=/root/cc/blog
+            CT=myFireflyBlog
+
+            echo "== blue-green deploy =="
+            echo "commit=${COMMIT:-<unknown>} probe=${PROBE:-<none>} mode=${MODE:-auto} slot_input=${INPUT_SLOT:-auto}"
+
+            # 1) 决定目标槽：dispatch 显式 slot 优先，否则自动挑非活动槽
+            if [ -n "${INPUT_SLOT:-}" ] && [ "$INPUT_SLOT" != "auto" ]; then
+              SLOT="$INPUT_SLOT"
+              echo "dispatch slot override -> $SLOT"
             else
-              echo "  ⚠️  未找到 SSL 证书目录，443 端口可能无法正常工作"
-              echo "  请先手动上传证书到 /root/cc/nginx/ssl/"
+              SLOT=$(bash "$BASE/bin/release-slot-pick.sh")
+              echo "auto slot-pick -> $SLOT"
+            fi
+            case "$SLOT" in
+              slot-a|slot-b) ;;
+              *)
+                echo "✗ slot-pick 返回 '$SLOT' —— current 软链异常，无法确定非活动槽"
+                echo "  用 SSH 查 release-status.sh 或手工跑 release-activate.sh <slot>"
+                exit 1
+                ;;
+            esac
+
+            # 2) 绝不清空/覆盖活动槽（活动槽内容正在被 nginx 服务）
+            CUR=$(readlink "$BASE/current" 2>/dev/null || echo none); CUR=${CUR#releases/}
+            if [ "$SLOT" = "$CUR" ]; then
+              echo "✗ 拒绝：目标槽 '$SLOT' 正是活动槽(current=$CUR)。"
+              echo "  场景需定向重建时改传另一槽，或先 stage-only 人工接管"
+              exit 1
             fi
 
-            # 随文附件：/root/cc/files → /files/（独立于 git 部署内容，由 scripts/upload-files.sh 上传）
-            # 注意：/usr/share/nginx/html 是只读挂载，/files 挂载点必须预先存在于宿主机
-            # （/root/cc/myFireflyBlog/files），否则 docker 无法在只读文件系统内创建挂载点
-            mkdir -p /root/cc/myFireflyBlog/files /root/cc/files
-            docker run -d \
-              --name myFireflyBlog \
-              --add-host host.docker.internal:host-gateway \
-              -v /root/cc/myFireflyBlog:/usr/share/nginx/html:ro \
-              -v /root/cc/files:/usr/share/nginx/html/files:ro \
-              $CONFIG_MOUNT \
-              $SSL_MOUNT \
-              -p 80:80 \
-              -p 443:443 \
-              --restart always \
-              nginx:alpine
+            # 3) .stage → 目标槽（整目录搬入候选槽；.stage 保持存在供下次 rm:true）
+            [ -d "$BASE/.stage" ] || { echo "✗ .stage 不存在 —— scp 内容步骤没跑/失败"; exit 1; }
+            rm -rf "$BASE/releases/$SLOT"
+            cp -a "$BASE/.stage/." "$BASE/releases/$SLOT/"
+            find "$BASE/.stage" -mindepth 1 -delete
+            echo "✓ filled $SLOT ($(find "$BASE/releases/$SLOT" -type f | wc -l) files)"
 
-            # 等待容器正常启动
-            echo "⏳ 等待容器启动..."
-            for i in $(seq 1 30); do
-              if docker ps --filter "name=myFireflyBlog" --filter "status=running" --format '{{.Names}}' | grep -q myFireflyBlog; then
-                echo "  容器已运行"
-                break
-              fi
-              echo "  等待中... ($i/30)"
-              sleep 2
-            done
+            # 4) marker 完整性门 —— 必须在内容落槽后写（SCP rm:true 会先清空槽）
+            printf '{"commit":"%s","probe":"%s"}\n' "${COMMIT:-unknown}" "${PROBE:-}" \
+              > "$BASE/releases/$SLOT/.deploy.json"
+            echo "✓ marker: $(cat "$BASE/releases/$SLOT/.deploy.json")"
 
-            # 连接到 coze-net 共享网络（与后端容器通信）
-            echo "🔗 连接到 coze-net 共享网络..."
-            docker network connect coze-net myFireflyBlog 2>/dev/null || echo "  已连接，跳过"
+            # 5) stage-only 或 .kill-auto → 只填不切（全人工接管信号）
+            if [ "${MODE:-auto}" = "stage-only" ] || [ -e "$BASE/.kill-auto" ]; then
+              echo "⏸ stage-only(mode=${MODE:-auto} kill_auto=$([ -e "$BASE/.kill-auto" ] && echo yes || echo no))"
+              echo "  槽 $SLOT 已填好未切流 —— 人工 SSH 验证后跑 release-activate.sh $SLOT"
+              exit 0
+            fi
 
-            # 重新加载 nginx
-            echo "🔄 重新加载 nginx..."
-            docker exec myFireflyBlog nginx -s reload 2>/dev/null || echo "  ⚠️  nginx reload 失败，可能还在启动中"
+            # 6) 激活：flock 互斥 → 槽完整性门 → nginx -t → 原子换链 → 自检(首页200+probe)
+            #    失败自动翻回 prev 槽并 reload → 脚本 exit 1 → job 红
+            bash "$BASE/bin/release-activate.sh" "$SLOT"
 
-            echo "✅ 部署完成"
+            # 7) 切流后状态一览
+            echo "== post-deploy status =="
+            bash "$BASE/bin/release-status.sh"

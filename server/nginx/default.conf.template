@@ -6,6 +6,9 @@
 # 路径:     /root/cc/nginx/conf/default.conf
 # 挂载:     -v /root/cc/nginx/conf/default.conf:/etc/nginx/conf.d/default.conf:ro
 # SSL:      -v /root/cc/nginx/ssl:/etc/nginx/ssl:ro
+# 双槽蓝绿: 容器 html 顶层挂 /root/cc/blog（内含 current 相对软链 + releases/slot-a|b）；
+#           本 server 内容 root 固定为 /usr/share/nginx/html/current → 原子换链即切流。
+#           附件 /files/ 独立 alias 回顶层 html/files（嵌套 bind /root/cc/files），与活动槽解耦。
 # ============================================
 
 # ============================================
@@ -58,7 +61,7 @@ server {
     ssl_session_cache   shared:SSL:10m;
     ssl_session_timeout 10m;
 
-    root   /usr/share/nginx/html;
+    root   /usr/share/nginx/html/current;  # 双槽蓝绿：current = 宿主 /root/cc/blog/current 相对软链 → releases/slot-a|b，换链即切流
     index  index.html;
 
     # ============================================
@@ -131,7 +134,10 @@ server {
     #   2. 下载速度限速 —— 前 8MB 全速，之后每连接限速 2MB/s
     # 参数可按需调整（rate / burst / limit_rate / limit_rate_after）。
     # ============================================
-    location /files/ {
+    # ^~ 阻断下方 \.(rss|xml)$ 与 \.html$ 正则抢走 /files/ 子树；
+    # alias 把 /files/* 从 current 槽解耦，永远回嵌套 bind 挂载点 html/files（宿主机 /root/cc/files）。
+    # alias 首尾都必须带斜杠（缺尾斜杠会把 /files/x 拼成 …/filesx）。
+    location ^~ /files/ {
         limit_req zone=file_download burst=20 nodelay;
         limit_req_status 429;
 
@@ -140,6 +146,12 @@ server {
 
         # 附件不缓存，确保每次下载都能拿到最新文件
         add_header Cache-Control "no-store, must-revalidate";
+        alias /usr/share/nginx/html/files/;
+    }
+
+    # 蓝绿槽内部目录(releases/)：候选槽在切流前不得对外可访问(也免 SEO 重复内容)
+    location ^~ /releases/ {
+        return 404;
     }
 
     # ============================================
@@ -152,7 +164,7 @@ server {
 
     error_page 500 502 503 504 /50x.html;
     location = /50x.html {
-        root   /usr/share/nginx/html;
+        # 无自带 root → 继承 server root=current；槽内必须自带 50x.html（public/50x.html 随 build 打进 dist）
         internal;
     }
 
