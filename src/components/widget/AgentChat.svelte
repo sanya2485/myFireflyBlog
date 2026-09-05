@@ -749,11 +749,30 @@ function quoteMessage(msg: ChatMessage) {
 		textInput?.scrollIntoView({ block: "nearest" });
 	});
 }
-function deleteMessage(msg: ChatMessage) {
-	agents.coze.messages = agents.coze.messages.filter((m) => m !== msg);
-	if (cozeQuote?.ts === msg.ts) cozeQuote = null; // 删的是正引用的那条 → 引用条一并撤下
-	saveMessages("coze");
-	showToast("已删除该条回复", "success");
+/** 重新生成最新一条消息：撤掉最后一条 user 及其回复，用该问题重新触发一轮回复 */
+function regenerateLatest() {
+	const msgs = agents.coze.messages;
+	if (agents.coze.streaming) return; // 流式中不打断本轮
+	let lastUserIdx = -1;
+	for (let i = msgs.length - 1; i >= 0; i--) {
+		if (msgs[i].role === "user") {
+			lastUserIdx = i;
+			break;
+		}
+	}
+	if (lastUserIdx === -1) return; // 无用户问题可重生成
+	const qText = msgs[lastUserIdx].content;
+	const qQuote = msgs[lastUserIdx].quote;
+	// 撤到该 user 之前（连同它的 assistant 回复一起移除），再重发同一问题
+	agents.coze.messages = msgs.slice(0, lastUserIdx);
+	// 原问题若带追问引用，恢复引用条以便 sendCoze 重新携带
+	if (qQuote)
+		cozeQuote = { role: "assistant", content: qQuote, ts: Date.now() };
+	void sendCoze(qText);
+}
+/** 点「删除」图标 = 新开会话（同「新对话」，tooltip 仍显示「删除」） */
+function deleteMessage(_msg: ChatMessage) {
+	clearActiveConversation();
 }
 
 // ==================== 选中文本 → 浮出追问按钮（参照 Coze SDK 选区追问） ====================
@@ -1154,6 +1173,15 @@ $effect(() => {
                   </button>
                   <button
                     type="button"
+                    class="msg-act"
+                    data-tip="重新生成"
+                    aria-label="重新生成"
+                    onclick={() => regenerateLatest()}
+                  >
+                    <Icon icon="material-symbols:refresh-rounded" size="sm" />
+                  </button>
+                  <button
+                    type="button"
                     class="msg-act danger"
                     data-tip="删除"
                     aria-label="删除"
@@ -1414,10 +1442,10 @@ $effect(() => {
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain; /* 顶/底到头不再把滚动串到背景文章页（#14） */
-    padding: 0.75rem;
+    padding: 0.75rem 0.75rem 2rem; /* 底部留足空间给末条的「操作行」absolute 浮标 */
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: 2rem; /* 每条消息统一等距；操作行浮在气泡下方的这个间距带里，不改变气泡间距 */
     position: relative; /* 作为「选中文本追问」浮出按钮的 absolute 定位锚点 */
   }
   .msg {
@@ -1432,6 +1460,7 @@ $effect(() => {
     align-self: flex-start;
     flex-direction: column; /* 气泡 + 操作行纵向排列，操作行排在气泡下方 */
     align-items: flex-start;
+    position: relative; /* 操作行 absolute 定位锚点（浮在气泡下方统一间距带内） */
   }
   .bubble {
     padding: 0.55rem 0.8rem;
@@ -1465,12 +1494,14 @@ $effect(() => {
     max-height: 3.6em;
     overflow: hidden;
   }
-  /* 单条消息操作（仅 Coze assistant）：常驻显示在气泡下方，流内不遮挡 */
+  /* 单条消息操作（仅 Coze assistant）：absolute 悬在气泡下方右下角，
+     不占消息布局高度 → 气泡之间间距由 .agent-messages 的 gap 统一，各条消息完全等距 */
   .msg-actions {
+    position: absolute;
+    top: calc(100% + 4px); /* 紧跟气泡底，4px 小间隙 */
+    right: 0; /* 靠右对齐到右下角 */
     display: flex;
     gap: 2px;
-    margin-top: 4px; /* 与气泡底部的小间距 */
-    align-self: flex-end; /* 操作行靠右对齐到右下角，不挡气泡 */
   }
   .msg-act {
     border: none;
