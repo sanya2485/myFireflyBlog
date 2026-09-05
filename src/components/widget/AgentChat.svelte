@@ -296,12 +296,15 @@
   }
 
   /** 拉取 Coze bot info 开场白（onboarding_info.prologue + suggested_questions），
-      空会话时渲染为首条消息。失败静默——没有开场白聊天窗也能正常用。 */
+      空会话时渲染为首条消息。失败静默——没有开场白聊天窗也能正常用。
+      ⚠️ 端点必须是 /v1/bots/{bot_id}：原 /v3/bot/info 在 Coze v3 不存在(4000)，
+      会话 token(czs_) 也无法调 get_online_info(需 PAT getMetadata)。实测 SDK 壳即用
+      GET /v1/bots/{id} + czs token → 200，onboarding_info 完整返回（2026-09-05 线上对照验证）。 */
   async function fetchBotInfo() {
     if (prologueFetched) return;
     if (!(await ensureCozeToken())) return;
     try {
-      const res = await fetch(`${cozeApiBase}/v3/bot/info?bot_id=${botId}`, {
+      const res = await fetch(`${cozeApiBase}/v1/bots/${botId}`, {
         headers: { Authorization: `Bearer ${cozeToken}` },
       });
       if (!res.ok) return;
