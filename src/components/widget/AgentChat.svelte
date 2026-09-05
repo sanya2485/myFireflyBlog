@@ -1,5 +1,6 @@
 <script lang="ts">
 import Icon from "@components/common/Icon.svelte";
+import { getIconSvg } from "@constants/icons";
 import { onMount } from "svelte";
 
 /**
@@ -777,28 +778,56 @@ function deleteMessage(_msg: ChatMessage) {
 
 // ==================== 选中文本 → 浮出追问按钮（参照 Coze SDK 选区追问） ====================
 /**
- * 依据 document selection 计算浮出按钮位置，仅在合法选区时设置 selReply。
- * 合法选区：落在同一 bubble 内（单条 assistant 消息、可部分选中）、非空、且当前是 Coze agent。
+ * 依据 document selection 计算浮出按钮位置，仅在合法选区时显示。
+ * 合法选区：落在同一条消息的同一气泡内（可部分选中；user/assistant 均可）、非空。
  * 定位到「最后选中那个字」下方：拖选方向决定末端是选区 end（从左往右）还是 start（从右往左），
  * 用 focus 端 caret 矩形定位，图标水平居中停在该字下方。
+ *
+ * 定位方式（关键，参照 Coze Web SDK 的选区浮层）：
+ * 按钮挂在 document.body 上、position:fixed，坐标直接用选区矩形的 viewport 值。
+ * 不能放进滚动容器的 absolute/fixed 子元素——absolute 子元素属于可滚动内容会随容器滚动，
+ * 且 .agent-panel.open 带 transform（translateY(0) 非 none），面板内 fixed 也相对面板定位。
+ * body 级 fixed 不受两者影响，滚动/收合由 scroll(capture) 与 selectionchange 监听重算。
  */
+let selBtn: HTMLButtonElement | null = null;
+
+/** 懒创建、挂到 body 的浮出「追问」按钮（fixed 定位）；svg 与 data-tip 一次性注入 */
+function ensureSelBtn(): HTMLButtonElement {
+	if (selBtn) return selBtn;
+	const btn = document.createElement("button");
+	btn.type = "button";
+	btn.className = "sel-reply-fixed";
+	btn.setAttribute("data-tip", "对选中内容追问");
+	btn.setAttribute("aria-label", "对选中内容追问");
+	btn.innerHTML = getIconSvg("material-symbols:reply-rounded");
+	btn.style.display = "none"; // 初始隐藏，出现合法选区再 show
+	btn.addEventListener("mousedown", (e) => e.preventDefault());
+	btn.addEventListener("click", () => handleSelReply());
+	document.body.appendChild(btn);
+	selBtn = btn;
+	return btn;
+}
+
+function hideSelBtn() {
+	if (selBtn) selBtn.style.display = "none";
+	selReply = null;
+}
+
 function updateSelReply() {
 	const sel = document.getSelection();
 	if (
 		!sel ||
 		sel.isCollapsed ||
 		sel.rangeCount === 0 ||
-		sel.toString().trim() === ""
+		sel.toString().trim() === "" ||
+		!sel.anchorNode ||
+		!sel.focusNode
 	) {
-		selReply = null;
+		hideSelBtn();
 		return;
 	}
 	const anchor = sel.anchorNode;
 	const focus = sel.focusNode;
-	if (!anchor || !focus) {
-		selReply = null;
-		return;
-	}
 	// 端点元素（文本节点取父元素）
 	const aEl = (
 		anchor.nodeType === Node.TEXT_NODE ? anchor.parentElement : anchor
@@ -807,14 +836,14 @@ function updateSelReply() {
 		focus.nodeType === Node.TEXT_NODE ? focus.parentElement : focus
 	) as Element | null;
 	if (!aEl || !fEl) {
-		selReply = null;
+		hideSelBtn();
 		return;
 	}
 	// 必须落在同一条消息的同一气泡内（不能跨消息/跨气泡选中；user/assistant 均可）
 	const ba = aEl.closest(".bubble");
 	const bf = fEl.closest(".bubble");
 	if (!ba || ba !== bf || !ba.closest(".msg")) {
-		selReply = null;
+		hideSelBtn();
 		return;
 	}
 	const range = sel.getRangeAt(0);
@@ -833,34 +862,25 @@ function updateSelReply() {
 	if (rect.width === 0 && rect.height === 0) {
 		rect = range.getBoundingClientRect();
 	}
-	// 面板带 transform（打开动画 translateY(0)，非 none）会让 fixed 后代相对面板定位，
-	// 故按钮用 absolute 锚到滚动容器 msgBox，坐标换算成容器内坐标（滚动时重算保对准）
-	const boxEl = msgBox;
-	if (!boxEl) {
-		selReply = null;
-		return;
-	}
-	const box = boxEl.getBoundingClientRect();
 	const ctr =
 		rect.width === 0
 			? forward
 				? rect.right
 				: rect.left
 			: rect.left + rect.width / 2;
-	// 按钮 absolute 锚定到 msgBox（containing block），坐标相对其 padding box；
-	// 滚动容器内的 absolute 子元素不随滚动移动 → 直接减 box.left/top 即可，
-	// 切勿再叠加 scrollTop/scrollLeft（否则列表滚过后图标被推到可视区下方/底部）。
-	selReply = {
-		x: ctr - box.left - 15, // 按钮 30px 宽，水平中心对准末端字号
-		y: rect.bottom - box.top + 6, // 停在该字下方，6px 间隔
-		text: sel.toString(),
-	};
+	// 按钮 30px 宽停在该字下方：直接使用 viewport 坐标（body 级 fixed 定位），
+	// 不再做任何「减容器坐标」换算——那样依赖容器是否滚动/有无 transform，才会偏移。
+	const btn = ensureSelBtn();
+	btn.style.left = `${ctr - 15}px`;
+	btn.style.top = `${rect.bottom + 6}px`;
+	btn.style.display = "flex";
+	selReply = { x: ctr - 15, y: rect.bottom + 6, text: sel.toString() };
 }
 /** 点击浮出的追问按钮：以选中文本建追问引用条，聚焦输入框让用户基于该内容继续问 */
 function handleSelReply() {
 	const sel = document.getSelection();
 	const text = selReply?.text || sel?.toString()?.trim() || "";
-	selReply = null;
+	hideSelBtn();
 	if (!text) return;
 	if (activeAgent === "coze") {
 		cozeQuote = { role: "assistant", content: text.trim(), ts: Date.now() };
@@ -943,6 +963,11 @@ onMount(() => {
 		document.removeEventListener("selectionchange", updateSelReply);
 		document.removeEventListener("mouseup", updateSelReply);
 		document.removeEventListener("scroll", updateSelReply, true);
+		// 卸载时移除挂到 body 的浮出按钮，避免跨页面残留
+		if (selBtn) {
+			selBtn.remove();
+			selBtn = null;
+		}
 	};
 });
 
@@ -1211,21 +1236,6 @@ $effect(() => {
               </button>
             {/each}
           </div>
-        {/if}
-        {#if selReply}
-          <!-- 选中文本后浮出的「追问」按钮（absolute 锚定到本滚动容器）：
-               点 mousedown 时 preventDefault，避免按钮吃掉当前文本选区 -->
-          <button
-            type="button"
-            class="sel-reply"
-            data-tip="对选中内容追问"
-            aria-label="对选中内容追问"
-            style={`left: ${selReply.x}px; top: ${selReply.y}px;`}
-            onmousedown={(e) => e.preventDefault()}
-            onclick={() => handleSelReply()}
-          >
-            <Icon icon="material-symbols:reply-rounded" size="sm" />
-          </button>
         {/if}
       </div>
     {/if}
@@ -1533,15 +1543,17 @@ $effect(() => {
   }
   /* 复制/追问/删除的 tooltip 显示在图标上方（全局 [data-tip] 默认行为）：
      用户确认不影响阅读，无需避让消息文本 */
-  /* --- 选中文本后浮出的「追问」按钮（absolute 锚到 .agent-messages） --- */
-  .sel-reply {
-    position: absolute;
-    z-index: 999; /* 确保浮出按钮绘制在任何消息/气泡/操作行之上，不被遮挡 */
+  /* --- 选中文本后浮出的「追问」按钮（命令式挂到 document.body、fixed 定位） ---
+     注意：按钮在组件 scoped 树之外，样式与 data-tip 提示都必须用 :global() 定义； */
+  :global(.sel-reply-fixed) {
+    position: fixed; /* 相对 viewport，坐标直接用选区矩形，不受面板 transform / 滚动容器影响 */
+    z-index: 1030; /* 高于面板 1020、浮窗按钮/图标，确保浮在一切之上且不被遮挡 */
     width: 30px;
     height: 30px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    padding: 0;
     border-radius: var(--radius-full);
     background: var(--card-bg);
     border: 1px solid var(--line-divider);
@@ -1551,9 +1563,64 @@ $effect(() => {
     transition: background var(--duration-fast) var(--ease-standard),
       color var(--duration-fast) var(--ease-standard);
   }
-  .sel-reply:hover {
+  :global(.sel-reply-fixed:hover) {
     background: var(--btn-regular-bg);
     color: var(--primary);
+  }
+  :global(.sel-reply-fixed svg) {
+    width: 16px;
+    height: 16px;
+    display: block;
+  }
+  /* body 上按钮的 tooltip（scoped [data-tip] 匹配不到，此处补全局版，提示在按钮上方）。
+     fixed 定位的按钮即为其绝对定位伪元素的 containing block，无需额外 relative。 */
+  :global(.sel-reply-fixed::after) {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 9px);
+    left: 50%;
+    transform: translateX(-50%) translateY(4px);
+    padding: 5px 9px;
+    border-radius: var(--radius-md);
+    background: oklch(0.22 0.012 var(--hue));
+    color: oklch(0.97 0.005 var(--hue));
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: nowrap;
+    z-index: 60;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity var(--duration-fast) var(--ease-standard),
+      visibility var(--duration-fast);
+  }
+  :global(.sel-reply-fixed::before) {
+    content: "";
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%) translateY(4px) rotate(45deg);
+    width: 8px;
+    height: 8px;
+    background: oklch(0.22 0.012 var(--hue));
+    z-index: 60;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity var(--duration-fast) var(--ease-standard),
+      visibility var(--duration-fast);
+  }
+  :global(.sel-reply-fixed:hover::after),
+  :global(.sel-reply-fixed:focus-visible::after) {
+    opacity: 1;
+    visibility: visible;
+    transform: translateX(-50%) translateY(0);
+  }
+  :global(.sel-reply-fixed:hover::before),
+  :global(.sel-reply-fixed:focus-visible::before) {
+    opacity: 1;
+    visibility: visible;
+    transform: translateX(-50%) translateY(0) rotate(45deg);
   }
   /* 流式打字动画 */
   .bubble.typing {
