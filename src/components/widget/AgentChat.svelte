@@ -1500,10 +1500,14 @@ $effect(() => {
     padding: 0.3rem 0.5rem;
     border-left: 3px solid color-mix(in oklab, var(--primary) 50%, transparent);
     border-radius: var(--radius-sm);
-    background: color-mix(in oklab, var(--primary) 7%, transparent);
+    /* 背景/文字对比要跟宿主气泡走：引用块可能嵌在 user(primary 深底·白字) 或
+       assistant(浅底·深字) 气泡里。故引用块【不设 color，继承宿主气泡文字色】，
+       只用半透明黑/白做区分背景（--content-meta 亮暗主题下即 rgba 黑/白），
+       这样无论深底还是浅底都能衬托出文字；之前硬编码 --content-meta 作文字色，
+       在 user 深底气泡里是黑系灰 → 完全不可见。 */
+    background: color-mix(in srgb, var(--content-meta) 10%, transparent);
     font-size: 12px;
     line-height: 1.4;
-    color: var(--content-meta);
     max-height: 3.6em;
     overflow: hidden;
   }
