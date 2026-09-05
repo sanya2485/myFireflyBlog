@@ -22,9 +22,11 @@ import { onMount } from "svelte";
 interface Props {
 	botId: string;
 	apiBase: string;
+	/** Dify 独立服务基址（微服务拆分后走 /api/dify，不再经 coze-gateway） */
+	difyApiBase: string;
 	cozeApiBase: string;
 }
-let { botId, apiBase, cozeApiBase }: Props = $props();
+let { botId, apiBase, difyApiBase, cozeApiBase }: Props = $props();
 
 // ==================== 类型 ====================
 type AgentKey = "coze" | "dify";
@@ -626,7 +628,7 @@ async function sendDify() {
 	let streamOk = false; // 流是否完整读完：中断/abort → false，部分回复也整体撤掉
 	let streamFailed = false; // 是否已 toast 过错误（回滚时避免重复提示）
 	try {
-		const res = await fetch(`${apiBase}/dify/chat`, {
+		const res = await fetch(`${difyApiBase}/chat`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
