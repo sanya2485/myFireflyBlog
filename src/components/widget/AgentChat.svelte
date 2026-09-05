@@ -1168,8 +1168,13 @@ $effect(() => {
             {#if msg.content}
               <div class="bubble">
                 {#if msg.quote}
-                  <!-- 追问消息的引用块：引用的是哪条回复 -->
-                  <div class="bubble-quote">引用：「{msg.quote}」</div>
+                  <!-- 追问消息的引用块：引用的是哪条回复（前置引用图标标识） -->
+                  <div class="bubble-quote">
+                    <span class="quote-ico">
+                      {getIconSvg("material-symbols:format-quote-rounded")}
+                    </span>
+                    <span class="quote-txt">引用：「{msg.quote}」</span>
+                  </div>
                 {/if}
                 {msg.content}
               </div>
@@ -1486,7 +1491,9 @@ $effect(() => {
   }
   .msg.user .bubble {
     background: var(--primary);
-    color: oklch(1 0 0);
+    /* 用户文字与引用行共用同一套随主题翻转的文字色：--content-meta 亮色=黑、暗色=白，
+       不再强制纯白——否则亮色下用户对话也是白字，与需求（亮黑暗白）不符。 */
+    color: var(--content-meta);
     border-bottom-right-radius: var(--radius-sm);
   }
   .msg.assistant .bubble {
@@ -1496,21 +1503,37 @@ $effect(() => {
   }
   /* 气泡内引用块（追问消息） */
   .bubble-quote {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.35rem;
     margin-bottom: 0.4rem;
     padding: 0.3rem 0.5rem;
     border-left: 3px solid color-mix(in oklab, var(--primary) 50%, transparent);
     border-radius: var(--radius-sm);
-    /* 背景留空=透明，跟随宿主气泡底色（用户要求：引用背景与用户会话背景相同）。
-       字体不继承宿主（dark 下 user 气泡是浅 primary 底+白字，白配浅会看不见），
-       统一用 --deep-text：亮色是中深底/浅底都可读，dark 下 user 浅底也可读；
-       dark 下 assistant 深底要用浅字，由下方 :global(html.dark) 覆盖补齐。 */
+    /* 引用块：文字颜色与用户对话共用同一套随主题翻转的 --content-meta
+      （亮色=黑、暗色=白），不再强制纯白——否则亮色下引用行也是白字，与需求不符。
+       背景用很淡的文字色灰底，仅用于与正文区分（用户要求若分不清可加灰）。 */
+    background: color-mix(in oklab, var(--content-meta) 9%, transparent);
     font-size: 12px;
     line-height: 1.4;
-    color: var(--deep-text);
+    color: var(--content-meta);
     max-height: 3.6em;
     overflow: hidden;
     user-select: none; /* 引用内容禁止选中（拖选消息正文时不应选进引用行） */
     -webkit-user-select: none;
+  }
+  .bubble-quote .quote-ico {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    line-height: 1;
+    margin-top: 0;
+  }
+  .bubble-quote .quote-ico :global(svg) {
+    width: 12px;
+    height: 12px;
+    display: block;
+    fill: currentColor; /* 引用图标跟随引用行文字色随主题翻转 */
   }
   /* 单条消息操作（仅 Coze assistant）：absolute 悬在气泡下方右下角，
      不占消息布局高度 → 气泡之间间距由 .agent-messages 的 gap 统一，各条消息完全等距 */
