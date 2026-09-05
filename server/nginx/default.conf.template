@@ -189,26 +189,6 @@ server {
     }
 
     # ============================================
-    # xxl-job-admin 调度中心（微服务编排）
-    #
-    # xxl-job-admin 容器自身的 Spring 上下文是 /xxl-job-admin（见其启动日志/应用配置），
-    # 所以 proxy_pass 必须不带尾斜杠：不加 URI 时 nginx 会原样透传完整请求 URI，
-    # 浏览器访问 /xxl-job-admin/... → 转发到容器 /xxl-job-admin/...，正好命中应用上下文。
-    # 若写成 /8080/（带尾斜杠）会把 /xxl-job-admin 前缀剥掉转成容器根 /，导致 404。
-    # （coze-gateway executor 直接经 coze-net 回调容器，不走 nginx，与这里的上下文路径无关。）
-    # ============================================
-    location /xxl-job-admin/ {
-        proxy_pass http://xxl-job-admin:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        proxy_no_cache 1;
-        proxy_cache_bypass 1;
-    }
-
-    # ============================================
     # Coze AI 助手 API 网关
     #
     # 博客容器与后端容器通过 coze-net 共享 Docker 网络互联，
