@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import Icon from "@components/common/Icon.svelte";
 
   /**
    * AgentChat.svelte — 博客 AI 助手自建聊天窗（M3 双 agent 壳）
@@ -69,6 +70,8 @@
   let toast = $state<{ text: string; type: ToastType } | null>(null);
   let msgBox = $state<HTMLElement | null>(null);
   let textInput = $state<HTMLTextAreaElement | null>(null);
+  // 移动端软键盘抬升（#10）：updateKbLift() 依 visualViewport 置位/复位
+  let kbUp = $state(false);
   // 追问引用条（仅 Coze）：「追问」点击后挂在输入框上方，发送时随消息携带
   let cozeQuote = $state<ChatMessage | null>(null);
 
@@ -238,10 +241,8 @@
     if (k === activeAgent) return;
     activeAgent = k;
     saveActive();
-    if (k === "dify" && !isAuthValid) {
-      // 锁定态切过来：停留展示锁屏
-      showToast("dify 未解锁", "warning");
-    }
+    // 锁定态切到 dify：面板内展示「大闸门锁屏」（.dify-lock）。#12 起不再弹
+    // 右下角「dify 未解锁」toast —— 那个浮动弹窗正是用户要求去掉的。
   }
 
   // ==================== Coze access token ====================
@@ -376,36 +377,78 @@
     }
   }
 
-  /** 解析 tool_response 内容，命中鉴权结果则保存每日 JWT */
+  /** 从 JWT 中段（payload）解出过期毫秒时间戳；解不出返回 NaN */
+  function jwtExpiryMs(jwt: string): number {
+    try {
+      const seg = jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+      const bin = atob(seg + "=".repeat((4 - (seg.length % 4)) % 4));
+      const exp = (JSON.parse(bin) as { exp?: number }).exp;
+      return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : NaN;
+    } catch {
+      return NaN;
+    }
+  }
+
+  /** 解析 tool_response 内容，命中鉴权结果则保存每日 JWT。
+      历次契约（全部兼容，判定只认放行铁律）：
+      - spec 版：{ success:true, token, expiresAt }（后端/指南约定字段名）
+      - Coze v2 实况：{ key:<JWT>, output:"鉴权成功", ... }
+      - Coze v3 实况（2026-09-05 重发后实测，须带 / 前缀才命中鉴权流）：
+        { successCode:"true", hasToken:"true", key:<JWT>, output:"鉴权成功", output2, output3 }
+        —— successCode/hasToken 是工作流节点输出的「字符串布尔」，仅旁证；key 仍为真 JWT。
+      放行铁律 = 拿到非空、结构合法、且能解出过期时间的 JWT；
+      拒绝信号 = success:false / successCode:"false" / hasToken:"false" / key 为空串
+      （后端 INVALID_CODE 拒绝时 key 为空 → 永不满足放行铁律，不解锁）。 */
   function handleToolResponse(content: string) {
     try {
       const parsed = JSON.parse(content);
       const data = typeof parsed === "string" ? JSON.parse(parsed) : parsed;
-      if (data && data.success === true && data.token) {
-        const changed =
-          auth.token !== data.token || auth.expiresAt !== data.expiresAt;
-        auth.token = data.token;
-        auth.expiresAt = data.expiresAt;
-        saveAuth();
-        if (changed) showToast("鉴权成功，dify 已解锁", "success");
-      }
+      if (!data || typeof data !== "object") return;
+      // 放行铁律兜底：token/key 结构非法（含拒绝时后端返回的空 key）一律不解锁
+      const jwt: unknown = data.token ?? data.key;
+      if (
+        typeof jwt !== "string" ||
+        !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(jwt)
+      )
+        return;
+      const expiresAt =
+        typeof data.expiresAt === "number"
+          ? data.expiresAt
+          : jwtExpiryMs(jwt);
+      if (!Number.isFinite(expiresAt)) return; // 解不出过期时间 → 拒绝解锁
+      const changed =
+        auth.token !== jwt || auth.expiresAt !== expiresAt;
+      auth.token = jwt;
+      auth.expiresAt = expiresAt;
+      saveAuth();
+      if (changed) showToast("鉴权成功，dify 已解锁", "success");
     } catch {
       /* tool_response 非鉴权 JSON，忽略 */
     }
   }
 
-  /** 解析 follow_up 消息：content 为 JSON 数组字符串，取前 3 条追问建议 */
-  function parseFollowUp(content: string): string[] {
+  /** 累积 Coze follow_up 追问建议（#15 修正）：Coze v3 每条 follow_up 的
+      conversation.message.completed 事件，其 content 是单句追问建议（直接
+      JSON.parse 会抛错）——旧版 bot 可能给 JSON 数组字符串，统一兼容：
+      数组逐条并入、单句直接并入；会话内去重并最多留 3 条（session-only，
+      随 sendCoze 每轮开始清空）。 */
+  function addFollowUp(content: string) {
+    let parsed: unknown = null;
     try {
-      const parsed = JSON.parse(content);
-      const arr = typeof parsed === "string" ? JSON.parse(parsed) : parsed;
-      if (Array.isArray(arr)) {
-        return arr.filter((s): s is string => typeof s === "string").slice(0, 3);
-      }
+      parsed = JSON.parse(content);
     } catch {
-      /* 解析失败返回空 */
+      /* 单句建议 → parsed 保持 null，按单句并入 */
     }
-    return [];
+    const items: string[] = Array.isArray(parsed)
+      ? parsed.filter((s): s is string => typeof s === "string")
+      : [String(content ?? "").trim()];
+    const cur = agents.coze.followUps;
+    const merged = [...cur];
+    for (const s of items) {
+      const t = s.trim();
+      if (t && !merged.includes(t) && merged.length < 3) merged.push(t);
+    }
+    if (merged.length !== cur.length) agents.coze.followUps = merged;
   }
 
   /** 构建 Coze 请求历史（auto_save_history:false → 无服务端记忆，每次全量下发）：
@@ -491,11 +534,14 @@
 
       let assistantText = "";
       await readSSE(res, (event, data) => {
-        // 流式增量可能走 conversation.chat.message.delta；tool_response/最终 answer 走
-        // conversation.message.completed——两者都收，mergeAnswer 兼容全量/增量两种语义
+        // 流式增量线名实测 = conversation.message.delta（2026-09-05 抓包确认，旧监听
+        // conversation.chat.message.delta 是错的 → delta 全被丢弃、只剩整段蹦出）；
+        // conversation.chat.message.delta 一并保留兜底。tool_response/最终 answer 走
+        // conversation.message.completed——两类都收，mergeAnswer 兼容全量/增量两种语义
         if (
           event === "conversation.message.completed" ||
-          event === "conversation.chat.message.delta"
+          event === "conversation.chat.message.delta" ||
+          event === "conversation.message.delta"
         ) {
           try {
             const msg = JSON.parse(data);
@@ -505,8 +551,8 @@
             } else if (msg.type === "tool_response" && msg.content) {
               handleToolResponse(msg.content);
             } else if (msg.type === "follow_up" && msg.content) {
-              // 回复后的追问建议：content 是 JSON 数组字符串，渲染为可点 chips
-              agents.coze.followUps = parseFollowUp(msg.content);
+              // 回复后的追问建议：v3 每事件 content 是单句，逐条累积为可点 chips
+              addFollowUp(msg.content);
             }
           } catch {
             /* 事件解析失败忽略 */
@@ -645,8 +691,7 @@
   /** 点击直接初始化，无需二次确认 */
   function onNewChatClick() {
     if (agents[activeAgent].messages.length === 0) {
-      showToast("已经是新对话了", "warning");
-      return;
+      return; // 已是空会话：连按静默拦截，不再弹「已经是新对话了」
     }
     clearActiveConversation();
   }
@@ -761,12 +806,99 @@
       if (msgBox) msgBox.scrollTop = msgBox.scrollHeight;
     });
   });
+
+  // ==================== 移动端键盘抬升 + 背景滚动锁定（#10/#13/#14） ====================
+  // #10/#13 软键盘：移动端软键盘不压缩布局视口，固定 bottom 面板的输入区会被盖住。
+  // 用 visualViewport 量出「可视区底到布局底的空隙 gap」（= 键盘遮挡像素）写进根级
+  // CSS 变量 --agent-kb，CSS 据此把面板底部抬到键盘上方（见 @media .kb-lift）。
+  // #13 真机「键盘仍挡输入框」补强：键盘只在输入框聚焦时弹起 → 抬升判据收窄为
+  // 「面板开 + 窄屏 + 输入框聚焦 + gap>120」；聚焦后 700ms 内持续补测（真机 focusin
+  // 常先于 visualViewport 收缩触发、vv resize 偶发漏发，迟到的收缩靠补测捞回），
+  // 并补挂 window resize（部分 Android 只发 window resize、不发 vv resize）。
+  let kbRetry: ReturnType<typeof setInterval> | undefined;
+
+  function isTextFocused() {
+    const el = document.activeElement;
+    return !!el && el.tagName === "TEXTAREA";
+  }
+
+  function updateKbLift() {
+    const narrow = window.innerWidth <= 768;
+    const vv = window.visualViewport ?? null;
+    let gap = 0;
+    if (vv) gap = Math.max(0, window.innerHeight - (vv.offsetTop + vv.height));
+    const up = panelOpen && narrow && isTextFocused() && gap > 120;
+    if (up === kbUp) return;
+    kbUp = up;
+    if (up) document.documentElement.style.setProperty("--agent-kb", `${gap}px`);
+    else document.documentElement.style.removeProperty("--agent-kb");
+  }
+
+  function startKbRetry() {
+    if (kbRetry) return;
+    kbRetry = setInterval(updateKbLift, 200);
+    setTimeout(() => stopKbRetry(), 700);
+  }
+  function stopKbRetry() {
+    if (kbRetry) {
+      clearInterval(kbRetry);
+      kbRetry = undefined;
+    }
+  }
+
+  // #14 背景滚动锁定：面板开启 + 窄屏 → 给 <html> 挂 agent-chat-open（CSS 置
+  // overflow:hidden），禁用下方文章页的上下滑；配合 .agent-messages 的
+  // overscroll-behavior: contain 阻断滚动手势在到达消息区顶/底后串到背景页。
+  function updateScrollLock() {
+    const on = panelOpen && window.innerWidth <= 768;
+    document.documentElement.classList.toggle("agent-chat-open", on);
+  }
+
+  const onFocusIn = () => {
+    startKbRetry();
+    updateKbLift();
+  };
+  const onFocusOut = () => {
+    stopKbRetry();
+    updateKbLift();
+  };
+  const onViewport = () => {
+    updateScrollLock();
+    updateKbLift();
+  };
+
+  // 面板开合后各重算一次（开合 → 滚动锁 + 抬升状态复位）
+  $effect(() => {
+    void panelOpen;
+    const raf = requestAnimationFrame(onViewport);
+    return () => cancelAnimationFrame(raf);
+  });
+
+  // 视口/方向/focus 变化都重算（监听一次即够；visualViewport.resize 覆盖键盘弹收动画）
+  $effect(() => {
+    const evt: EventTarget = window.visualViewport ?? window;
+    evt.addEventListener("resize", onViewport);
+    if (window.visualViewport) evt.addEventListener("scroll", onViewport); // iOS 聚焦自动滚动会平移视口
+    window.addEventListener("resize", onViewport); // 窄/宽屏切换、无 vv 的浏览器兜底
+    window.addEventListener("orientationchange", onViewport);
+    window.addEventListener("focusin", onFocusIn);
+    window.addEventListener("focusout", onFocusOut);
+    return () => {
+      evt.removeEventListener("resize", onViewport);
+      if (window.visualViewport) evt.removeEventListener("scroll", onViewport);
+      window.removeEventListener("resize", onViewport);
+      window.removeEventListener("orientationchange", onViewport);
+      window.removeEventListener("focusin", onFocusIn);
+      window.removeEventListener("focusout", onFocusOut);
+    };
+  });
 </script>
 
 <!-- ===== 聊天窗面板 ===== -->
 <div
   class="agent-panel"
   class:open={panelOpen}
+  class:kb-lift={kbUp}
   role="dialog"
   aria-hidden={!panelOpen}
   aria-label="博客 AI 助手"
@@ -804,14 +936,17 @@
     <button
       type="button"
       class="agent-newchat"
+      data-tip="新对话"
+      aria-label="新对话"
       disabled={agents[activeAgent].streaming}
       onclick={onNewChatClick}
     >
-      新对话
+      <Icon icon="material-symbols:add-rounded" size="md" />
     </button>
     <button
       type="button"
       class="agent-close"
+      data-tip="关闭"
       aria-label="关闭 AI 助手"
       onclick={closePanel}
     >
@@ -869,10 +1004,34 @@
               <!-- 单条操作（hover 显示）：复制=双 agent 对等；追问/删除=仅 Coze
                    （8-25 裁决：dify 会话在服务端，本地删/追问不同步上下文，不提供） -->
               <div class="msg-actions">
-                <button type="button" class="msg-act" onclick={() => void copyMessage(msg)}>复制</button>
+                <button
+                  type="button"
+                  class="msg-act"
+                  data-tip="复制"
+                  aria-label="复制"
+                  onclick={() => void copyMessage(msg)}
+                >
+                  <Icon icon="material-symbols:content-copy" size="sm" />
+                </button>
                 {#if activeAgent === "coze"}
-                  <button type="button" class="msg-act" onclick={() => quoteMessage(msg)}>追问</button>
-                  <button type="button" class="msg-act danger" onclick={() => deleteMessage(msg)}>删除</button>
+                  <button
+                    type="button"
+                    class="msg-act"
+                    data-tip="追问"
+                    aria-label="追问"
+                    onclick={() => quoteMessage(msg)}
+                  >
+                    <Icon icon="material-symbols:reply-rounded" size="sm" />
+                  </button>
+                  <button
+                    type="button"
+                    class="msg-act danger"
+                    data-tip="删除"
+                    aria-label="删除"
+                    onclick={() => deleteMessage(msg)}
+                  >
+                    <Icon icon="material-symbols:delete-rounded" size="sm" />
+                  </button>
                 {/if}
               </div>
             {/if}
@@ -907,6 +1066,7 @@
         <button
           type="button"
           class="quote-clear"
+          data-tip="取消引用"
           aria-label="取消引用"
           onclick={() => (cozeQuote = null)}
         >
@@ -928,10 +1088,16 @@
       <button
         type="button"
         class="send-btn"
+        data-tip="发送"
+        aria-label="发送"
         disabled={!input.trim() || agents[activeAgent].streaming}
         onclick={send}
       >
-        {agents[activeAgent].streaming ? "…" : "发送"}
+        {#if agents[activeAgent].streaming}
+          <Icon icon="svg-spinners:3-dots-bounce" size="md" />
+        {:else}
+          <Icon icon="material-symbols:send-rounded" size="md" />
+        {/if}
       </button>
     </div>
   {/if}
@@ -956,13 +1122,16 @@
     max-width: calc(100vw - 2rem);
     height: min(560px, calc(100vh - 2rem));
     max-height: calc(100vh - 2rem);
+    height: min(560px, calc(100dvh - 2rem)); /* 支持 dvh 的浏览器优先（移动端动态视口） */
+    max-height: calc(100dvh - 2rem);
     display: flex;
     flex-direction: column;
     background: var(--card-bg);
     border: 1px solid var(--line-divider);
     border-radius: var(--radius-2xl);
     box-shadow: var(--shadow-xl);
-    overflow: hidden;
+    /* 注意：不开 overflow:hidden，否则头部按钮的 tooltip 向上溢出面板顶会被裁掉。
+       消息滚动的圆角裁剪已由 .agent-body 的 overflow:hidden 承担。 */
     opacity: 0;
     visibility: hidden;
     transform: translateY(16px) scale(0.98);
@@ -1061,15 +1230,19 @@
     background: var(--btn-regular-bg);
     color: var(--deep-text);
   }
+  /* 新对话：图标按钮，与关闭同尺寸、同风格（方形圆角，hover 主题色） */
   .agent-newchat {
     flex-shrink: 0;
-    padding: 0.4rem 0.6rem;
+    width: 28px;
+    height: 28px;
+    padding: 0;
     border: 1px solid var(--line-divider);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-full);
     background: none;
     color: var(--content-meta);
-    font-size: 12px;
-    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
     transition:
       background var(--duration-fast) var(--ease-standard),
@@ -1077,7 +1250,7 @@
   }
   .agent-newchat:hover:not(:disabled) {
     background: var(--btn-regular-bg);
-    color: var(--deep-text);
+    color: var(--primary);
   }
   .agent-newchat:disabled {
     opacity: 0.4;
@@ -1096,6 +1269,7 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    overscroll-behavior: contain; /* 顶/底到头不再把滚动串到背景文章页（#14） */
     padding: 0.75rem;
     display: flex;
     flex-direction: column;
@@ -1169,9 +1343,12 @@
   .msg-act {
     border: none;
     background: none;
-    padding: 0.25rem 0.5rem;
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border-radius: var(--radius-sm);
-    font-size: 12px;
     color: var(--content-meta);
     cursor: pointer;
     transition:
@@ -1227,9 +1404,10 @@
   }
   .suggest-chip {
     padding: 0.4rem 0.75rem;
-    border: 1px solid var(--line-divider);
+    border: 1px solid color-mix(in oklab, var(--primary) 28%, var(--line-divider));
     border-radius: var(--radius-full);
-    background: var(--btn-regular-bg);
+    /* 快捷指令胶囊：主题色淡染 + 稍高亮度的表面，与面板/气泡背景拉开区分度 */
+    background: color-mix(in oklab, var(--primary) 13%, var(--btn-regular-bg));
     color: var(--deep-text);
     font-size: 12.5px;
     line-height: 1.45;
@@ -1241,9 +1419,9 @@
       color var(--duration-fast) var(--ease-standard);
   }
   .suggest-chip:hover:not(:disabled) {
-    border-color: color-mix(in oklab, var(--primary) 50%, transparent);
+    border-color: color-mix(in oklab, var(--primary) 70%, transparent);
     color: var(--primary);
-    background: color-mix(in oklab, var(--primary) 8%, transparent);
+    background: color-mix(in oklab, var(--primary) 22%, var(--btn-regular-bg));
   }
   .suggest-chip:disabled {
     opacity: 0.4;
@@ -1317,15 +1495,22 @@
   .agent-footer textarea:focus {
     border-color: color-mix(in oklab, var(--primary) 55%, transparent);
   }
+  /* 占位符显式配色：亮色=中灰提示；暗色覆盖见 html.dark（近白） */
+  .agent-footer textarea::placeholder {
+    color: color-mix(in oklab, var(--deep-text) 46%, transparent);
+  }
   .send-btn {
     flex-shrink: 0;
+    width: 36px;
     height: 36px;
-    padding: 0 1rem;
+    padding: 0;
     border: none;
     border-radius: var(--radius-full);
     background: var(--primary);
     color: oklch(1 0 0);
-    font-size: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
     transition:
       opacity var(--duration-fast) var(--ease-standard),
@@ -1386,6 +1571,61 @@
     color: var(--deep-text);
   }
 
+  /* ===== 图标按钮 tooltip（data-tip）=====
+     特例：.suggest-chip / .agent-tab 是想展示内容的按键，不是"具名按钮"，
+     不挂 data-tip。凡挂了 data-tip 的按钮，hover/focus-visible 时在正上方
+     弹出提示文本 + 小箭头（按钮名字）。深底浅字，亮暗主题通用（--hue 跟随站点色相）。 */
+  [data-tip] {
+    position: relative;
+  }
+  [data-tip]::before,
+  [data-tip]::after {
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    transition:
+      opacity var(--duration-fast) var(--ease-standard),
+      visibility var(--duration-fast);
+  }
+  [data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 9px);
+    left: 50%;
+    transform: translateX(-50%) translateY(4px);
+    padding: 5px 9px;
+    border-radius: var(--radius-md);
+    background: oklch(0.22 0.012 var(--hue));
+    color: oklch(0.97 0.005 var(--hue));
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: nowrap;
+    z-index: 60;
+  }
+  [data-tip]::before {
+    content: "";
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%) translateY(4px) rotate(45deg);
+    width: 8px;
+    height: 8px;
+    background: oklch(0.22 0.012 var(--hue));
+    z-index: 60;
+  }
+  [data-tip]:hover::after,
+  [data-tip]:focus-visible::after {
+    opacity: 1;
+    visibility: visible;
+    transform: translateX(-50%) translateY(0);
+  }
+  [data-tip]:hover::before,
+  [data-tip]:focus-visible::before {
+    opacity: 1;
+    visibility: visible;
+    transform: translateX(-50%) translateY(0) rotate(45deg);
+  }
+
   /* --- Toast --- */
   .agent-toast {
     position: fixed;
@@ -1419,17 +1659,17 @@
     color: #1a7f3b;
     border: 1px solid #bfe9c9;
   }
-  html.dark .agent-toast.error {
+  :global(html.dark) .agent-toast.error {
     background: oklch(0.3 0.08 20);
     color: oklch(0.85 0.12 20);
     border-color: oklch(0.45 0.1 20);
   }
-  html.dark .agent-toast.warning {
+  :global(html.dark) .agent-toast.warning {
     background: oklch(0.32 0.08 70);
     color: oklch(0.88 0.1 70);
     border-color: oklch(0.45 0.1 70);
   }
-  html.dark .agent-toast.success {
+  :global(html.dark) .agent-toast.success {
     background: oklch(0.32 0.08 150);
     color: oklch(0.88 0.1 150);
     border-color: oklch(0.45 0.1 150);
@@ -1439,24 +1679,27 @@
      --deep-text 无暗色重定义（暗色下仍是近黑 oklch(0.25…)），
      消息气泡 / 输入框 / 锁屏标题直接拿它当文字色 → 黑底黑字看不清。
      统一换成 --btn-content（暗色下为浅色调文字）。 */
-  html.dark .msg.assistant .bubble,
-  html.dark .agent-footer textarea,
-  html.dark .dify-lock .lock-title,
-  html.dark .agent-tab:hover,
-  html.dark .agent-close:hover,
-  html.dark .suggest-chip,
-  html.dark .msg-actions .msg-act,
-  html.dark .quote-text,
-  html.dark .quote-clear,
-  html.dark .bubble-quote,
-  html.dark .agent-newchat {
+  /* AI 内容正文 + 输入实文：暗色下用近白正文色（--btn-content L≈0.75 仍偏灰、辨识度不足） */
+  :global(html.dark) .msg.assistant .bubble,
+  :global(html.dark) .agent-footer textarea {
+    color: oklch(0.92 0.015 var(--hue));
+  }
+  :global(html.dark) .dify-lock .lock-title,
+  :global(html.dark) .agent-tab:hover,
+  :global(html.dark) .agent-close:hover,
+  :global(html.dark) .suggest-chip,
+  :global(html.dark) .msg-actions .msg-act,
+  :global(html.dark) .quote-text,
+  :global(html.dark) .quote-clear,
+  :global(html.dark) .bubble-quote,
+  :global(html.dark) .agent-newchat {
     color: var(--btn-content);
   }
-  html.dark .msg-act.danger:hover {
+  :global(html.dark) .msg-act.danger:hover {
     color: oklch(0.7 0.18 20);
   }
-  html.dark .agent-footer textarea::placeholder {
-    color: rgba(255, 255, 255, 0.35);
+  :global(html.dark) .agent-footer textarea::placeholder {
+    color: rgba(255, 255, 255, 0.6);
   }
   @keyframes agentToastIn {
     from {
@@ -1471,11 +1714,25 @@
 
   /* --- 移动端 --- */
   @media (max-width: 768px) {
+    /* 面板开启 + 窄屏：锁死背景页面滚动（#14）。class 由 JS updateScrollLock 挂 <html> */
+    :global(html.agent-chat-open),
+    :global(html.agent-chat-open body) {
+      overflow: hidden;
+    }
     .agent-panel {
       right: 1rem;
       left: 1rem;
       width: auto;
       height: min(560px, calc(100vh - 2rem));
+      height: min(560px, calc(100dvh - 2rem));
+    }
+    /* 软键盘弹起（#10）：updateKbLift() 把键盘遮挡像素写进根级 --agent-kb。
+       顶/底同时钉住 → 面板撑满键盘以上的可视区、输入区始终可见；无键盘时永不挂此类。 */
+    .agent-panel.kb-lift {
+      top: 0.5rem;
+      bottom: calc(var(--agent-kb, 0px) + 0.5rem);
+      height: auto;
+      max-height: none;
     }
     .agent-toast {
       right: 1rem;
