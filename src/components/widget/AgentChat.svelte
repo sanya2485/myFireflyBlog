@@ -1021,7 +1021,7 @@ $effect(() => {
               <div class="bubble typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
             {/if}
             {#if msg.role === "assistant" && msg.content}
-              <!-- 单条操作（hover 显示）：复制=双 agent 对等；追问/删除=仅 Coze
+              <!-- 单条操作（常驻在气泡下方）：复制=双 agent 对等；追问/删除=仅 Coze
                    （8-25 裁决：dify 会话在服务端，本地删/追问不同步上下文，不提供） -->
               <div class="msg-actions">
                 <button
@@ -1298,7 +1298,6 @@ $effect(() => {
   .msg {
     display: flex;
     max-width: 88%;
-    position: relative; /* 单条操作按钮的定位锚点 */
   }
   .msg.user {
     align-self: flex-end;
@@ -1306,6 +1305,8 @@ $effect(() => {
   }
   .msg.assistant {
     align-self: flex-start;
+    flex-direction: column; /* 气泡 + 操作行纵向排列，操作行排在气泡下方 */
+    align-items: flex-start;
   }
   .bubble {
     padding: 0.55rem 0.8rem;
@@ -1339,26 +1340,11 @@ $effect(() => {
     max-height: 3.6em;
     overflow: hidden;
   }
-  /* 单条消息操作（仅 Coze assistant，hover 出现） */
+  /* 单条消息操作（仅 Coze assistant）：常驻显示在气泡下方，流内不遮挡 */
   .msg-actions {
-    position: absolute;
-    top: -0.5rem;
-    right: 0;
     display: flex;
     gap: 2px;
-    padding: 2px;
-    border: 1px solid var(--line-divider);
-    border-radius: var(--radius-lg);
-    background: var(--card-bg);
-    box-shadow: var(--shadow-button);
-    opacity: 0;
-    visibility: hidden;
-    z-index: 2;
-    transition: opacity var(--duration-fast) var(--ease-standard);
-  }
-  .msg:hover .msg-actions {
-    opacity: 1;
-    visibility: visible;
+    margin-top: 4px; /* 与气泡底部的小间距 */
   }
   .msg-act {
     border: none;
@@ -1381,6 +1367,16 @@ $effect(() => {
   }
   .msg-act.danger:hover {
     color: #c00;
+  }
+  /* msg-act 位于气泡下方：tooltip 改放到图标行下方，避免覆盖消息文本
+     （transform 沿用全局 tooltip 的上下滑入动画，此处仅翻转垂直方向） */
+  .msg-act::after {
+    bottom: auto;
+    top: calc(100% + 9px);
+  }
+  .msg-act::before {
+    bottom: auto;
+    top: calc(100% + 4px);
   }
   /* 流式打字动画 */
   .bubble.typing {
