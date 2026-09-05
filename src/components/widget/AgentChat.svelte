@@ -1190,9 +1190,11 @@ $effect(() => {
             {:else if agents[activeAgent].streaming}
               <div class="bubble typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
             {/if}
-            {#if msg.role === "assistant" && msg.content}
+            {#if msg.role === "assistant" && msg.content && i === agents[activeAgent].messages.length - 1}
               <!-- 单条操作（常驻在气泡下方）：复制=双 agent 对等；追问/删除=仅 Coze
-                   （8-25 裁决：dify 会话在服务端，本地删/追问不同步上下文，不提供） -->
+                   （8-25 裁决：dify 会话在服务端，本地删/追问不同步上下文，不提供）。
+                   ⚠️ 只在「最后一条 AI 回复」渲染操作行——历史回看时不打扰阅读，
+                   且「重新生成/删除」本就只对最后一轮有意义。 -->
               <div class="msg-actions">
                 <button
                   type="button"
