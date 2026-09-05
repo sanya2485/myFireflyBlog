@@ -189,6 +189,24 @@ server {
     }
 
     # ============================================
+    # xxl-job-admin 调度中心（微服务编排）
+    #
+    # /xxl-job-admin/ 转发到独立容器 xxl-job-admin:8080 的根上下文——
+    # 尾斜杠 proxy_pass 会去掉前缀，浏览器经此访问控制台；而 coze-gateway executor
+    # 在 coze-net 内网直接以 http://xxl-job-admin:8080 回调（无前缀），两者语义一致。
+    # ============================================
+    location /xxl-job-admin/ {
+        proxy_pass http://xxl-job-admin:8080/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
+    }
+
+    # ============================================
     # Coze AI 助手 API 网关
     #
     # 博客容器与后端容器通过 coze-net 共享 Docker 网络互联，
