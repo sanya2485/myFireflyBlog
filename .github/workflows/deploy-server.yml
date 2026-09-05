@@ -87,6 +87,17 @@ jobs:
             echo "probe=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: 🎛️ Deploy params（mode / slot）
+        id: params
+        run: |
+          # push 事件无 dispatch inputs → 空值回落 auto；dispatch 时取用户所选
+          MODE_VAL="${{ github.event.inputs.mode }}"
+          SLOT_VAL="${{ github.event.inputs.slot }}"
+          [ -z "$MODE_VAL" ] && MODE_VAL=auto
+          [ -z "$SLOT_VAL" ] && SLOT_VAL=auto
+          echo "mode=$MODE_VAL" >> "$GITHUB_OUTPUT"
+          echo "slot=$SLOT_VAL" >> "$GITHUB_OUTPUT"
+
       - name: 🖥️ Server prep（迁移门 + 建目录）
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -132,13 +143,13 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USERNAME }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          env:
-            COMMIT: ${{ steps.meta.outputs.commit }}
-            PROBE: ${{ steps.meta.outputs.probe }}
-            MODE: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || 'auto') || 'auto' }}
-            INPUT_SLOT: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.slot || 'auto') || 'auto' }}
           script: |
             set -euo pipefail
+            # appleboy 无可靠 env 转发，with 只能放标量 → 值经 GitHub 表达式内联进远程 shell
+            COMMIT="${{ steps.meta.outputs.commit }}"
+            PROBE="${{ steps.meta.outputs.probe }}"
+            MODE="${{ steps.params.outputs.mode }}"
+            INPUT_SLOT="${{ steps.params.outputs.slot }}"
             BASE=/root/cc/blog
             CT=myFireflyBlog
 
