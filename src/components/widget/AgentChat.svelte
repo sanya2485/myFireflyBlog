@@ -1180,7 +1180,7 @@ $effect(() => {
                   <!-- 追问消息的引用块：引用的是哪条回复（前置引用图标标识） -->
                   <div class="bubble-quote">
                     <span class="quote-ico">
-                      {getIconSvg("material-symbols:format-quote-rounded")}
+                      {@html getIconSvg("material-symbols:format-quote-rounded")}
                     </span>
                     <span class="quote-txt">引用：「{msg.quote}」</span>
                   </div>
@@ -1502,9 +1502,8 @@ $effect(() => {
   }
   .msg.user .bubble {
     background: var(--primary);
-    /* 用户文字与引用行共用同一套随主题翻转的文字色：--content-meta 亮色=黑、暗色=白，
-       不再强制纯白——否则亮色下用户对话也是白字，与需求（亮黑暗白）不符。 */
-    color: var(--content-meta);
+    /* 用户文字统一白色（用户明确要求不再随主题翻转——亮色、暗色都是白字） */
+    color: oklch(1 0 0);
     border-bottom-right-radius: var(--radius-sm);
   }
   .msg.assistant .bubble {
@@ -1521,12 +1520,11 @@ $effect(() => {
     padding: 0.3rem 0.5rem;
     border-left: 3px solid color-mix(in oklab, var(--primary) 50%, transparent);
     border-radius: var(--radius-sm);
-    /* 引用块：文字颜色与用户对话共用同一套随主题翻转的 --content-meta
-      （亮色=黑、暗色=白），不再强制纯白——否则亮色下引用行也是白字，与需求不符。
+    /* 引用块：文字统一白色（与用户对话一致——亮色、暗色都是白字）。
        背景留空=透明，跟随宿主气泡底色，与用户会话背景一致（不加灰）。 */
     font-size: 12px;
     line-height: 1.4;
-    color: var(--content-meta);
+    color: oklch(1 0 0);
     max-height: 3.6em;
     overflow: hidden;
     user-select: none; /* 引用内容禁止选中（拖选消息正文时不应选进引用行） */
@@ -1982,11 +1980,7 @@ $effect(() => {
   :global(html.dark) .agent-footer textarea {
     color: oklch(0.92 0.015 var(--hue));
   }
-  /* dark 下 assistant 是深灰底 → 引用文字用近白（跟随主文，可读）；
-     user 是浅 primary 底 → 引用默认 --deep-text 深字已可读，勿被 --btn-content 浅色覆盖 */
-  :global(html.dark) .msg.assistant .bubble .bubble-quote {
-    color: oklch(0.92 0.015 var(--hue));
-  }
+  /* 引用行文字现已统一白色（见 .bubble-quote），无需暗色下再单独覆盖 */
   :global(html.dark) .dify-lock .lock-title,
   :global(html.dark) .agent-tab:hover,
   :global(html.dark) .agent-close:hover,
