@@ -1345,6 +1345,7 @@ $effect(() => {
     display: flex;
     gap: 2px;
     margin-top: 4px; /* 与气泡底部的小间距 */
+    align-self: flex-end; /* 操作行靠右对齐到右下角，不挡气泡 */
   }
   .msg-act {
     border: none;
@@ -1364,6 +1365,9 @@ $effect(() => {
   .msg-act:hover {
     background: var(--btn-regular-bg);
     color: var(--primary);
+  }
+  .msg-act.danger {
+    color: #c00; /* 垃圾桶/删除图标常驻红色，不只在 hover 时变红 */
   }
   .msg-act.danger:hover {
     color: #c00;
@@ -1711,8 +1715,9 @@ $effect(() => {
   :global(html.dark) .agent-newchat {
     color: var(--btn-content);
   }
+  :global(html.dark) .msg-actions .msg-act.danger,
   :global(html.dark) .msg-act.danger:hover {
-    color: oklch(0.7 0.18 20);
+    color: oklch(0.7 0.18 20); /* 暗色下删除图标同样常驻红色 */
   }
   :global(html.dark) .agent-footer textarea::placeholder {
     color: rgba(255, 255, 255, 0.6);
