@@ -11,7 +11,7 @@ import { onMount } from "svelte";
  * - 双 agent 并行常驻：Coze 博客助手 + Dify 智库，点击切换（D2 指针切换）
  * - Coze 侧：浏览器持 Coze access_token 直连 api.coze.cn/v3/chat（stream, auto_save_history:false），
  *   从 SSE 的 tool_response 解析每日 JWT（D1/D4）
- * - Dify 侧：带 Authorization: Bearer <每日JWT> 调后端 /api/coze/dify/chat（M4 代理，D7）
+ * - Dify 侧：带 Authorization: Bearer <每日JWT> 调后端 /api/dify/chat（微服务拆分后直连 dify-gateway，不再经 coze-gateway）
  * - 大闸门：无有效每日 JWT → Dify 锁定态（D8）
  * - 会话持久化：agentchat_ 前缀 localStorage（避开 clearCozeSessionCache 的 coze_ 清理范围）
  *
