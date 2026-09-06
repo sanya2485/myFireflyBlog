@@ -19,6 +19,17 @@
 limit_req_zone $binary_remote_addr zone=file_download:10m rate=5r/s;
 
 # ============================================
+# Docker 内嵌 DNS（127.0.0.11）：容器名 → 最新 IP 的解析
+# 背景：nginx 内联主机名 proxy_pass（如 http://coze-gateway:8080）默认只在
+# 启动/重载那一刻解析并缓存 IP。一旦后端容器重建（换新 IP），nginx 会继续连旧地址
+# → connection refused → 502（2026-09-07 实际事故）。加 resolver 后，用变量
+# proxy_pass 每次请求都经 Docker DNS 重新解析，valid=10s 内自动跟上 IP 变化，自愈。
+# 注意：必须用「变量形式 proxy_pass + resolver」；`server … resolve` 参数是 nginx Plus 才有，
+# 开源版(nginx:alpine)只能用这套。
+# ============================================
+resolver 127.0.0.11 valid=10s ipv6=off;
+
+# ============================================
 # HTTP → HTTPS 重定向
 # ============================================
 server {
@@ -175,7 +186,9 @@ server {
     # Coze 服务（coze-gateway）故障不影响 Dify。前端持每日 JWT 走 /api/dify/chat。
     # ============================================
     location /api/dify/ {
-        proxy_pass http://dify-gateway:8081;
+        # 变量化 proxy_pass + 顶部 resolver：容器重建换 IP 时自动重新解析，避免 stale-IP 502
+        set $dify_upstream http://dify-gateway:8081;
+        proxy_pass $dify_upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -198,7 +211,9 @@ server {
     # ============================================
     location /api/coze/ {
         # ---- 反向代理到后端 ----
-        proxy_pass http://coze-gateway:8080;
+        # 变量化 proxy_pass + 顶部 resolver：容器重建换 IP 时自动重新解析，避免 stale-IP 502
+        set $coze_upstream http://coze-gateway:8080;
+        proxy_pass $coze_upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -216,7 +231,9 @@ server {
     # （Coze 工作流 HTTP 节点携带），浏览器无该头 → 403，不可直达。
     # ============================================
     location /api/auth/ {
-        proxy_pass http://coze-gateway:8080;
+        # 变量化 proxy_pass + 顶部 resolver：容器重建换 IP 时自动重新解析，避免 stale-IP 502
+        set $coze_upstream http://coze-gateway:8080;
+        proxy_pass $coze_upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
