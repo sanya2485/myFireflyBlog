@@ -2,7 +2,7 @@
 title: 博客 AI 助手“无回复”根因：反代网关地址缓存过期导致 502
 published: 2026-09-07
 description: "博客 AI 助手无回复的排查经历：根因是反向代理网关在后端容器重建后仍沿用缓存中的旧地址向后端转发，导致网关错误（502）；通过动态上游 + 内网 DNS 解析器实现自愈。"
-tags: [nginx, docker, 网关, 502, 自愈]
+tags: [nginx, docker, 网关, "502", 自愈]
 category: 技术实践
 draft: false
 ---
